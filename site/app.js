@@ -1,0 +1,16 @@
+let language='es';
+const translated=[...document.querySelectorAll('[data-en]')];
+translated.forEach(el=>el.dataset.es=el.innerHTML);
+const toggle=document.getElementById('language');
+toggle.addEventListener('click',()=>{language=language==='es'?'en':'es';document.documentElement.lang=language;translated.forEach(el=>el.innerHTML=el.dataset[language]);toggle.textContent=language==='es'?'EN':'ES';toggle.setAttribute('aria-label',language==='es'?'Switch to English':'Cambiar a español');});
+const dialog=document.getElementById('lightbox');
+document.querySelectorAll('[data-photo]').forEach(button=>button.addEventListener('click',()=>{dialog.querySelector('img').src='assets/'+button.dataset.photo+'.webp';dialog.querySelector('img').alt=button.querySelector('img').alt;dialog.showModal();}));
+document.getElementById('close').onclick=()=>dialog.close();dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close();});
+const whatsapp=message=>'https://wa.me/573104318331?text='+encodeURIComponent(message);
+document.querySelectorAll('.room-book').forEach(link=>link.addEventListener('click',()=>{link.href=whatsapp(language==='es'?'Hola, quisiera consultar disponibilidad y tarifas para '+link.dataset.room+'.':'Hello, I would like to ask about availability and rates for '+link.dataset.roomEn+'.');}));
+const form=document.getElementById('booking'),arrival=form.elements.arrival,departure=form.elements.departure;
+const today=new Date(),localDate=new Date(today.getTime()-today.getTimezoneOffset()*60000).toISOString().slice(0,10);arrival.min=localDate;departure.min=localDate;
+arrival.addEventListener('change',()=>{departure.min=arrival.value;departure.setCustomValidity('');});departure.addEventListener('change',()=>departure.setCustomValidity(''));
+form.addEventListener('submit',event=>{event.preventDefault();if(departure.value<=arrival.value){departure.setCustomValidity(language==='es'?'La salida debe ser después de la llegada.':'Check-out must be after check-in.');departure.reportValidity();return;}departure.setCustomValidity('');const guests=form.elements.guests.value,room=form.elements.room.selectedOptions[0].textContent;const message=language==='es'?`Hola, quisiera consultar disponibilidad en Hospedaje Don Lolo. Llegada: ${arrival.value}. Salida: ${departure.value}. Huéspedes: ${guests}. Habitación: ${room}. ¿Me pueden confirmar disponibilidad y tarifa?`:`Hello, I would like to ask about a stay at Hospedaje Don Lolo. Check-in: ${arrival.value}. Check-out: ${departure.value}. Guests: ${guests}. Room: ${room}. Could you confirm availability and rates?`;window.location.href=event.submitter?.value==='email'?'mailto:hospedajedonlolosantarosa@gmail.com?subject='+encodeURIComponent(language==='es'?'Consulta de reserva — Hospedaje Don Lolo':'Booking inquiry — Hospedaje Don Lolo')+'&body='+encodeURIComponent(message):whatsapp(message);});
+
+document.querySelectorAll('.map-select').forEach(button=>button.addEventListener('click',()=>{const map=document.getElementById('area-map');map.src='https://maps.google.com/maps?q='+encodeURIComponent(button.dataset.mapQuery)+'&z=14&output=embed';map.title=button.dataset.mapQuery;map.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'center'});}));

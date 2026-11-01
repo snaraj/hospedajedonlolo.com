@@ -1,6 +1,12 @@
+# Local coverage profiles (AGENTS.md "Quality gates")
 coverage.out
+cover.out
 *.cover.out
 .DS_Store
+
+# CPython's bytecode cache for the scripts/ci contract suites. Every documented
+# invocation passes -B and writes nothing, but a plain `python3 -m unittest`
+# without it leaves .pyc files behind.
 __pycache__/
 
 # Agent worktrees (see AGENTS.md, "Parallel agents in one checkout").

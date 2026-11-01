@@ -1,0 +1,293 @@
+name: PR gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # PR synchronizations may cancel an older run for the same PR.  Every main
+  # push instead uses its unique run id, so a later merge can never erase the
+  # successful-CI event that publishes an earlier merge.
+  group: pr-gate-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Test hostile contract suites
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_*.py' -v
+      - name: Validate the Dependabot configuration contract
+        run: python3 -I -B scripts/ci/dependabot_contract.py .github/dependabot.yml
+      - name: Enforce the commit identity and co-author contract
+        # `gitleaks git` and `gitleaks dir` both read BLOB content, so commit
+        # AUTHOR/COMMITTER identity and message bodies have no coverage from
+        # either scan. This step closes that gap for the range this event
+        # actually contributes — never all of history, which would re-litigate
+        # the root commit on every run. Scoped exactly like the release-range
+        # step below, and for the same reason: the push base is unrecoverable
+        # from git alone once later merges land.
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
+            base_sha="${PR_BASE_SHA}"
+            head_sha="${PR_HEAD_SHA}"
+          elif [ "${GITHUB_EVENT_NAME}" = push ] && [ "${GITHUB_REF}" = refs/heads/main ]; then
+            base_sha="${PUSH_BASE_SHA}"
+            head_sha="${PUSH_HEAD_SHA}"
+            test "${head_sha}" = "${GITHUB_SHA}"
+          else
+            printf 'unsupported identity-gate event %s on %s\n' "${GITHUB_EVENT_NAME}" "${GITHUB_REF}" >&2
+            exit 1
+          fi
+          python3 -I -B scripts/ci/commit_identity_contract.py \
+            --repository . --base "${base_sha}" --head "${head_sha}"
+      - name: Enforce one exact patch from the protected base
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
+            base_sha="${PR_BASE_SHA}"
+            head_sha="${PR_HEAD_SHA}"
+            first_parent=()
+          elif [ "${GITHUB_EVENT_NAME}" = push ] && [ "${GITHUB_REF}" = refs/heads/main ]; then
+            base_sha="${PUSH_BASE_SHA}"
+            head_sha="${PUSH_HEAD_SHA}"
+            test "${head_sha}" = "${GITHUB_SHA}"
+            first_parent=(--first-parent)
+          else
+            printf 'unsupported release-gate event %s on %s\n' "${GITHUB_EVENT_NAME}" "${GITHUB_REF}" >&2
+            exit 1
+          fi
+          verdict="${RUNNER_TEMP}/transition-verdict.json"
+          python3 -I -B scripts/ci/release_contract.py transition \
+            --repository . --base "${base_sha}" --head "${head_sha}" \
+            "${first_parent[@]}" | tee "${verdict}"
+          jq -er 'if .class == "artifact" or .class == "no-artifact" then .class else error("unknown transition class") end' \
+            "${verdict}"
+      - name: Publish the transition verdict for the release orchestrator
+        # The orchestrator must learn WHICH range this push validated — the
+        # push base is unrecoverable from git alone once later merges land —
+        # so the gate's own verdict rides as a run artifact bound to this
+        # exact run ID. The artifact supplies the RANGE, and the orchestrator
+        # re-derives the classification over it from git. Note precisely what
+        # that does and does not buy: because the re-derivation takes the
+        # claimed base as input, a verdict naming a base inside the push
+        # would re-derive a different answer, so the orchestrator anchors its
+        # no-artifact path on the last gated main head from the Actions
+        # record instead of trusting this range alone.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: transition-verdict
+          path: ${{ runner.temp }}/transition-verdict.json
+          if-no-files-found: error
+          # A run re-attempt re-uploads under the same immutable name; without
+          # overwrite the collision fails the gate and strands the merged SHA.
+          overwrite: true
+      - name: Install checksum-verified tools
+        run: ./scripts/ci/install-tools.sh
+      - name: Reject high or critical source dependency vulnerabilities
+        run: >-
+          trivy fs --scanners vuln --include-dev-deps
+          --severity HIGH,CRITICAL --exit-code 1
+          --ignore-unfixed=false --timeout 10m
+          --cache-dir "${RUNNER_TEMP}/trivy-source-cache" .
+      - name: Validate workflows
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            -o "${RUNNER_TEMP}/actionlint.tar.gz"
+          printf '%s  %s\n' \
+            "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" \
+            "${RUNNER_TEMP}/actionlint.tar.gz" | sha256sum -c - >/dev/null
+          tar -xzf "${RUNNER_TEMP}/actionlint.tar.gz" -C "${RUNNER_TEMP}" actionlint
+          "${RUNNER_TEMP}/actionlint"
+      - name: Scan full history for secrets
+        run: gitleaks git --no-banner --redact --max-target-megabytes=2 .
+      - name: Scan working tree for secrets
+        run: gitleaks dir --no-banner --redact .
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+
+  application:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.10'
+          check-latest: false
+          cache: false
+      - name: Verify application toolchain
+        # GOTOOLCHAIN=local reads the compiler setup-go installed: in the
+        # default auto mode go.mod's `toolchain` line would fetch that release
+        # for this check alone and pass while the installed compiler is older.
+        # Go is the whole toolchain: this repository has no Node and no npm.
+        run: |
+          test "$(GOTOOLCHAIN=local go env GOVERSION)" = "go1.26.10"
+      - name: Test Go service with the embedded site
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "${unformatted}" ]; then
+            printf 'gofmt is required for:\n%s\n' "${unformatted}" >&2
+            exit 1
+          fi
+          go vet ./...
+          CGO_ENABLED=0 go test ./...
+          go test -race ./...
+      - name: Enforce and report Go test coverage
+        env:
+          GOTOOLCHAIN: local
+          # Ratchet-only floor (total statement coverage, measured at 94.9%
+          # when last raised). Raise it as coverage grows; lowering it weakens
+          # an enforced check and is out of policy. This figure and the two in
+          # AGENTS.md are ONE fact about ONE measurement: move them together,
+          # or they become three claims that can disagree.
+          GO_COVERAGE_FLOOR: '94.0'
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test -covermode=atomic \
+            -coverprofile="${RUNNER_TEMP}/site.cover.out" ./...
+          total="$(go tool cover -func="${RUNNER_TEMP}/site.cover.out" \
+            | awk '/^total:/{gsub(/%/,"",$3); print $3}')"
+          {
+            printf '### Go coverage\n\n```\n'
+            go tool cover -func="${RUNNER_TEMP}/site.cover.out" | tail -n 8
+            printf '```\n\ntotal %s%% against a %s%% floor\n' \
+              "${total}" "${GO_COVERAGE_FLOOR}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          [[ "${total}" =~ ^(100(\.0+)?|[0-9]{1,2}(\.[0-9]+)?)$ ]]
+          awk -v got="${total}" -v floor="${GO_COVERAGE_FLOOR}" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "Go coverage %.1f%% is below the %.1f%% floor\n", got, floor
+              exit 1
+            }
+            printf "Go coverage %.1f%% meets the %.1f%% floor\n", got, floor
+          }'
+
+  chart:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install checksum-verified tools
+        run: ./scripts/ci/install-tools.sh
+      - name: Lint and render the chart
+        run: |
+          helm lint chart
+          # The chart requires the platform's Kubernetes target (>=1.36);
+          # helm template defaults to older capabilities without this flag.
+          helm template smoke chart --kube-version v1.36.0 >/dev/null
+      - name: The ingress policy must pin one peer by its full identity
+        run: ./scripts/ci/chart-ingress-pin.sh
+      - name: The application policy must deny all egress
+        run: ./scripts/ci/chart-egress-pin.sh
+      - name: Media must render as exactly one read-only claim the process is told about
+        run: ./scripts/ci/chart-media-pin.sh
+      - name: Chart version must match VERSION
+        run: |
+          IFS= read -r version < VERSION
+          chart_version="$(awk '/^version:/{print $2; exit}' chart/Chart.yaml)"
+          app_version="$(awk '/^appVersion:/{gsub(/"/,"",$2); print $2; exit}' chart/Chart.yaml)"
+          test "${chart_version}" = "${version}"
+          test "${app_version}" = "${version}"
+          # Fourth leg of the same lock. The workload reference renders
+          # repository:tag@digest, so the tag is what an operator reads in
+          # `kubectl describe pod`. A chart claiming appVersion X while
+          # defaulting the image tag to release Y would make that reading
+          # confidently wrong, which is worse than the digest-only reference
+          # it replaced. ADR 0014 publishes the `v` prefix, so the tag is
+          # exactly "v${version}".
+          image_tag="$(awk '/^  tag:/{print $2; exit}' chart/values.yaml)"
+          test "${image_tag}" = "v${version}"
+          # The digest is not optional and never becomes optional: a rendered
+          # reference must still carry it, or the tag has replaced the thing
+          # it was only ever allowed to accompany.
+          helm template smoke chart --kube-version v1.36.0 \
+            | grep -Eq '^ +image: "ghcr\.io/snaraj/[a-z-]+:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}"$'
+
+  container:
+    # Pull requests only, exactly like dependency-review above. This job is
+    # a REQUIRED PR context and stays one: what is removed is the second,
+    # cache-less execution on the main push, which gates nothing. Merges are
+    # squash-or-rebase with strict required checks and no merge commits, so
+    # the tree that lands IS the tree this check already built, and the
+    # Dockerfile takes no build argument and no git metadata, so the build is
+    # a pure function of that tree. The bytes that ship are still built,
+    # tested, scanned for HIGH/CRITICAL, signed and attested inside
+    # release-publisher.yml's privileged job -- nothing about the release
+    # path changes. EXPECTED_MAIN_JOBS in scripts/ci/release_contract.py
+    # records the resulting `skipped` conclusion for the publisher's exact
+    # job-inventory check: this condition and that constant move together.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build both production architectures without publishing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false

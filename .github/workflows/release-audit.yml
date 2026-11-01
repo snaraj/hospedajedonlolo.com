@@ -1,0 +1,285 @@
+name: Release alias audit
+
+on:
+  schedule:
+    - cron: '17 8 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-alias-audit-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out protected main with complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install checksum-verified tools
+        run: ./scripts/ci/install-tools.sh
+      - name: Set up Buildx for embedded provenance inspection
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Re-bind the latest Release, aliases, signatures, provenance, and scan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ghcr.io/snaraj/hospedajedonlolo-com
+          CHART: ghcr.io/snaraj/charts/hospedajedonlolo-com
+          HELM_REGISTRY_CONFIG: ${{ runner.temp }}/helm-registry.json
+        run: |
+          set -euo pipefail
+          api_version='2026-03-10'
+          release_json="${RUNNER_TEMP}/audit-release.json"
+          manifest="${RUNNER_TEMP}/audit-release-manifest.json"
+          notes="${RUNNER_TEMP}/audit-release-notes.md"
+          main_run_json="${RUNNER_TEMP}/audit-main-run.json"
+          ref_json="${RUNNER_TEMP}/audit-tag-ref.json"
+          tag_json="${RUNNER_TEMP}/audit-tag-object.json"
+
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header "X-GitHub-Api-Version: ${api_version}" \
+            "repos/${GITHUB_REPOSITORY}/releases/latest" > "${release_json}"
+          tag="$(jq -er '.tag_name | select(test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' "${release_json}")"
+          asset_name="hospedajedonlolo-com-${tag}-release-manifest.json"
+          asset_api="$(jq -er --arg name "${asset_name}" \
+            '.assets | select(length == 1) | .[0] | select(.name == $name) | .url' \
+            "${release_json}")"
+          curl --fail-with-body --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${manifest}" \
+            --header 'Accept: application/octet-stream' \
+            --header "X-GitHub-Api-Version: ${api_version}" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${asset_api}"
+
+          repository="$(jq -er '.repository' "${manifest}")"
+          source_sha="$(jq -er '.source_sha' "${manifest}")"
+          main_run_id="$(jq -er '.main_run_id' "${manifest}")"
+          version="$(jq -er '.release.version' "${manifest}")"
+          image_digest="$(jq -er '.artifacts.image.digest' "${manifest}")"
+          chart_digest="$(jq -er '.artifacts.chart.digest' "${manifest}")"
+          test "${repository}" = "${GITHUB_REPOSITORY}"
+          test "${tag}" = "v${version}"
+          python3 -I -B scripts/ci/release_contract.py manifest-record \
+            --manifest "${manifest}" --repository "${repository}" \
+            --source-sha "${source_sha}" --main-run-id "${main_run_id}" \
+            --version "${version}" --image "${IMAGE}" --image-digest "${image_digest}" \
+            --chart "${CHART}" --chart-digest "${chart_digest}"
+          python3 -I -B scripts/ci/release_contract.py release-notes \
+            --manifest "${manifest}" --output "${notes}" --repository "${repository}" \
+            --source-sha "${source_sha}" --main-run-id "${main_run_id}" \
+            --version "${version}" --image "${IMAGE}" --image-digest "${image_digest}" \
+            --chart "${CHART}" --chart-digest "${chart_digest}"
+          python3 -I -B scripts/ci/release_contract.py release-record \
+            --release-json "${release_json}" --tag "${tag}" \
+            --title "hospedajedonlolo.com ${tag}" --body "${notes}" --manifest "${manifest}"
+
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header "X-GitHub-Api-Version: ${api_version}" \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${main_run_id}" > "${main_run_json}"
+          test "$(python3 -I -B scripts/ci/release_contract.py main-run-record \
+            --run-json "${main_run_json}" --run-id "${main_run_id}" \
+            --repository "${GITHUB_REPOSITORY}" --source-sha "${source_sha}")" = "${source_sha}"
+          git cat-file -e "${source_sha}^{commit}"
+          git merge-base --is-ancestor "${source_sha}" HEAD
+
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header "X-GitHub-Api-Version: ${api_version}" \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" > "${ref_json}"
+          tag_object="$(jq -er '.object.sha' "${ref_json}")"
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header "X-GitHub-Api-Version: ${api_version}" \
+            "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" > "${tag_json}"
+          python3 -I -B scripts/ci/release_contract.py tag-record \
+            --ref-json "${ref_json}" --tag-json "${tag_json}" \
+            --tag "${tag}" --source-sha "${source_sha}" \
+            --message "Release ${tag} from ${source_sha}" \
+            --tagger-name 'github-actions[bot]' \
+            --tagger-email '41898282+github-actions[bot]@users.noreply.github.com' \
+            --tagger-date "$(git show -s --format=%cI "${source_sha}")"
+
+          credentials="${RUNNER_TEMP}/audit-ghcr.netrc"
+          sbom_token_file="${RUNNER_TEMP}/audit-sbom-token.json"
+          trap 'rm -f -- "${credentials}" "${RUNNER_TEMP}/image-token.json" "${RUNNER_TEMP}/chart-token.json" "${sbom_token_file}"' EXIT
+          umask 077
+          printf 'machine ghcr.io\nlogin %s\npassword %s\n' \
+            "${GITHUB_ACTOR}" "${GHCR_PASSWORD}" > "${credentials}"
+          registry_digest() {
+            local repository="$1" reference="$2" accept="$3" prefix="$4"
+            local token_file manifest_file headers status token digest computed
+            token_file="${RUNNER_TEMP}/${prefix}-token.json"
+            manifest_file="${RUNNER_TEMP}/${prefix}-manifest.json"
+            headers="${RUNNER_TEMP}/${prefix}-headers.txt"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
+              --get --data-urlencode "scope=repository:${repository}:pull" \
+              'https://ghcr.io/token' > "${token_file}"
+            token="$(jq -er '.token // .access_token' "${token_file}")"
+            rm -f -- "${token_file}"
+            status="$(curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${manifest_file}" \
+              --dump-header "${headers}" --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${token}" --header "Accept: ${accept}" \
+              "https://ghcr.io/v2/${repository}/manifests/${reference}")"
+            python3 -I -B scripts/ci/release_contract.py registry-state \
+              --http-status "${status}" >/dev/null
+            digest="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "${headers}" | tail -n 1)"
+            computed="sha256:$(sha256sum "${manifest_file}" | awk '{print $1}')"
+            test "${digest}" = "${computed}"
+            printf '%s\n' "${digest}"
+          }
+          image_repository="${IMAGE#ghcr.io/}"
+          chart_repository="${CHART#ghcr.io/}"
+          test "$(registry_digest "${image_repository}" "${tag}" \
+            'application/vnd.oci.image.index.v1+json' image)" = "${image_digest}"
+          test "$(registry_digest "${chart_repository}" "${version}" \
+            'application/vnd.oci.image.manifest.v1+json' chart)" = "${chart_digest}"
+          curl --fail-with-body --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
+            --get --data-urlencode "scope=repository:${image_repository}:pull" \
+            'https://ghcr.io/token' > "${sbom_token_file}"
+          sbom_token="$(jq -er '.token // .access_token' "${sbom_token_file}")"
+          rm -f -- "${credentials}" "${sbom_token_file}"
+
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-publisher.yml@refs/heads/main"
+          cosign verify --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${image_digest}" >/dev/null
+          cosign verify --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${CHART}@${chart_digest}" >/dev/null
+
+          expected_platforms='linux/amd64 linux/arm64'
+          provenance="${RUNNER_TEMP}/audit-provenance.json"
+          docker buildx imagetools inspect "${IMAGE}@${image_digest}" \
+            --format '{{ json .Provenance }}' > "${provenance}"
+          test "$(jq -r 'keys[]' "${provenance}" | paste -sd ' ' -)" = "${expected_platforms}"
+          sbom_plan="${RUNNER_TEMP}/audit-sbom-plan.json"
+          python3 -I -B scripts/ci/release_contract.py sbom-index-record \
+            --index "${RUNNER_TEMP}/image-manifest.json" \
+            --image-digest "${image_digest}" --output "${sbom_plan}"
+          for platform in ${expected_platforms}; do
+            prefix="audit-sbom-${platform//\//-}"
+            subject_digest="$(jq -er --arg platform "${platform}" \
+              '.[$platform].subject_digest' "${sbom_plan}")"
+            attestation_digest="$(jq -er --arg platform "${platform}" \
+              '.[$platform].attestation_digest' "${sbom_plan}")"
+            attestation="${RUNNER_TEMP}/${prefix}-manifest.json"
+            headers="${RUNNER_TEMP}/${prefix}-headers.txt"
+            status="$(curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${attestation}" \
+              --dump-header "${headers}" --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${sbom_token}" \
+              --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+              "https://ghcr.io/v2/${image_repository}/manifests/${attestation_digest}")"
+            test "$(python3 -I -B scripts/ci/release_contract.py registry-state \
+              --http-status "${status}")" = present
+            observed="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "${headers}" | tail -n 1)"
+            computed="sha256:$(sha256sum "${attestation}" | awk '{print $1}')"
+            test "${observed}" = "${attestation_digest}"
+            test "${computed}" = "${attestation_digest}"
+            layer_digest="$(python3 -I -B scripts/ci/release_contract.py sbom-layer-record \
+              --manifest "${attestation}" --attestation-digest "${attestation_digest}")"
+            sbom_statement="${RUNNER_TEMP}/${prefix}-statement.json"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${sbom_statement}" \
+              --header "Authorization: Bearer ${sbom_token}" \
+              "https://ghcr.io/v2/${image_repository}/blobs/${layer_digest}"
+            python3 -I -B scripts/ci/release_contract.py sbom-statement \
+              --statement "${sbom_statement}" --layer-digest "${layer_digest}" \
+              --image "${IMAGE}" --subject-digest "${subject_digest}" \
+              --platform "${platform}" >/dev/null
+          done
+          expected_attestations=()
+          # The audit re-binds a release published by an EARLIER run, and the
+          # canonical manifest records `main_run_id` -- the PR-gate run on main,
+          # not the publisher run that built the image -- so no recorded field
+          # names the builder. The run identity is therefore read
+          # once from the first platform's predicate and required of every
+          # platform, while the contract re-derives the complete
+          # `<source>/actions/runs/<id>[/attempts/<n>]` form from that candidate
+          # and denies any other spelling. What anchors it externally is the
+          # cosign certificate identity verified below plus the exact
+          # statement-set comparison that follows it, which weighs these
+          # reconstructed statements byte for byte against the
+          # cryptographically verified ones (issue #137).
+          builder_run_id=''
+          for platform in ${expected_platforms}; do
+            predicate="${RUNNER_TEMP}/audit-${platform//\//-}.json"
+            statement="${RUNNER_TEMP}/audit-${platform//\//-}.statement.json"
+            modified_predicate="${RUNNER_TEMP}/audit-${platform//\//-}.predicate.json"
+            docker buildx imagetools inspect "${IMAGE}@${image_digest}" \
+              --format "{{ json (index .Provenance \"${platform}\").SLSA }}" > "${predicate}"
+            if [ -z "${builder_run_id}" ]; then
+              builder_id="$(jq -er '.runDetails.builder.id' "${predicate}")"
+              builder_run_id="${builder_id#"https://github.com/${GITHUB_REPOSITORY}/actions/runs/"}"
+              builder_run_id="${builder_run_id%%/*}"
+            fi
+            python3 -I -B scripts/ci/release_contract.py attestation-statement \
+              --predicate "${predicate}" --output "${statement}" \
+              --predicate-output "${modified_predicate}" \
+              --image "${IMAGE}" --digest "${image_digest}" \
+              --source "https://github.com/${GITHUB_REPOSITORY}" \
+              --revision "${source_sha}" --platform "${platform}" \
+              --builder-run-id "${builder_run_id}"
+            expected_attestations+=(--expected "${platform}=${statement}")
+          done
+          verified="${RUNNER_TEMP}/audit-verified-attestations.json"
+          cosign verify-attestation --type slsaprovenance1 --output json \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${image_digest}" > "${verified}"
+          python3 -I -B scripts/ci/release_contract.py attestation-set \
+            --verified "${verified}" "${expected_attestations[@]}"
+
+          expected_source="${RUNNER_TEMP}/audit-expected-source"
+          expected_archives="${RUNNER_TEMP}/audit-expected-chart"
+          published_archives="${RUNNER_TEMP}/audit-published-chart"
+          expected_tree="${RUNNER_TEMP}/audit-expected-tree"
+          published_tree="${RUNNER_TEMP}/audit-published-tree"
+          mkdir -p "${expected_source}" "${expected_archives}" "${published_archives}" \
+            "${expected_tree}" "${published_tree}"
+          git archive "${source_sha}" chart | tar -x -C "${expected_source}"
+          chart_name="$(awk '/^name:/{print $2; exit}' "${expected_source}/chart/Chart.yaml")"
+          # ADR 0016 step 1 (issue #111): the published chart carries the
+          # released image digest, while the committed source keeps the
+          # fail-closed sentinel. This audit reproduces the publisher, so it
+          # performs the publisher's substitution with the digest THIS RELEASE'S
+          # manifest binds. That is strictly stronger than the byte compare it
+          # replaces: the diff below now also proves the published chart deploys
+          # the exact image the Release, the signature, and the provenance are
+          # about, and a chart carrying any other digest fails the audit.
+          python3 -I -B scripts/ci/release_contract.py chart-digest-embed \
+            --values "${expected_source}/chart/values.yaml" --digest "${image_digest}"
+          helm package "${expected_source}/chart" --version "${version}" \
+            --app-version "${version}" -d "${expected_archives}"
+          printf '%s' "${GHCR_PASSWORD}" | helm registry login ghcr.io \
+            -u "${GITHUB_ACTOR}" --password-stdin
+          helm pull "oci://${CHART}" --version "${version}" -d "${published_archives}"
+          tar -xzf "${expected_archives}/${chart_name}-${version}.tgz" -C "${expected_tree}"
+          tar -xzf "${published_archives}/${chart_name}-${version}.tgz" -C "${published_tree}"
+          python3 -I -B scripts/ci/release_contract.py chart-digest-assert \
+            --values "${published_tree}/${chart_name}/values.yaml" --digest "${image_digest}"
+          diff -ru --no-dereference "${expected_tree}/${chart_name}" "${published_tree}/${chart_name}"
+
+          trivy image --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 1 \
+            --ignore-unfixed=false --timeout 10m \
+            --cache-dir "${RUNNER_TEMP}/trivy-audit-cache" "${IMAGE}@${image_digest}"

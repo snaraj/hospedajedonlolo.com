@@ -1,0 +1,68 @@
+name: CodeQL
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '41 9 * * 6'
+
+permissions: {}
+
+# Cancellation is for superseded PR runs and nothing else. The group falls
+# back to `github.sha` off a pull request, so two main PUSHES never share a
+# group and cannot cancel each other — but the weekly SCHEDULE resolves to the
+# default branch's head SHA, which IS the group of a push run still analysing
+# that same commit, and would cancel it. `release-publisher.yml` authorizes
+# against a CodeQL run matching event=push, head_branch=main, that exact
+# head_sha, and conclusion=success (classify_codeql_run_record,
+# scripts/ci/release_contract.py). A cancelled push run has conclusion
+# `cancelled`, and no second push-event run for that SHA can ever exist, so
+# that one cancellation makes the version permanently unreleasable. Guarding
+# the flag matches the sibling repositories (naranjo.online and lidersea.com)
+# under the one-taxonomy rule.
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.10'
+          check-latest: false
+          cache: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - name: Build Go
+        if: matrix.language == 'go'
+        env:
+          GOTOOLCHAIN: local
+        run: go build ./...
+      - name: Analyze
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0

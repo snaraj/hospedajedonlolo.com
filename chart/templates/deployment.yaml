@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hospedajedonlolo-com
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hospedajedonlolo-com.labels" . | nindent 4 }}
+  annotations:
+    platform.snaraj.dev/deployment-ready: {{ .Values.deploymentReady | quote }}
+spec:
+  {{- /* deploymentReady gates the replica count: the platform enters a new
+  site's release with it false, so the objects render and bind before any Pod
+  runs, and the reviewed activation flips it. */}}
+  replicas: {{ if .Values.deploymentReady }}{{ .Values.replicaCount }}{{ else }}0{{ end }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # The namespace quota admits exactly replicaCount Pods, so a surge Pod
+      # would be quota-rejected and wedge the rollout. One Pod is swapped out
+      # before its replacement starts; at two replicas the other keeps serving.
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "hospedajedonlolo-com.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "hospedajedonlolo-com.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: hospedajedonlolo-com
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hospedajedonlolo-com
+          {{- /* The digest is what Kubernetes resolves and cosign verifies; the
+          tag is legibility only. The schema requires both. */}}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}@{{ .Values.image.digest }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: {{ .Values.service.port | quote }}
+            {{- /* MEDIA_ROOT is the same value as the mount below, so the
+            process and the mount cannot disagree about where the files are. */}}
+            - name: MEDIA_ROOT
+              value: {{ .Values.media.mountPath | quote }}
+            - name: MEDIA_MAX_CONCURRENT
+              value: {{ .Values.media.maxConcurrent | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+            timeoutSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            failureThreshold: 3
+            periodSeconds: 30
+            timeoutSeconds: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- /* readOnly on BOTH the mount and the volume: the mount flag is
+            what this container gets, the volume flag is what any future
+            container in this Pod gets. Media is written host-side only. */}}
+            - name: media
+              mountPath: {{ .Values.media.mountPath | quote }}
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: media
+          persistentVolumeClaim:
+            claimName: {{ .Values.media.claimName | quote }}
+            readOnly: true

@@ -1,0 +1,88 @@
+# Lift mechanism for scripts/ci/test_workflow_integrity.py
+#
+# That gate refuses three specific dangerous constructs in
+# `.github/workflows/`, and one disagreement between a workflow and the
+# contract that describes it. Each RULE refusal lifts here, one line, with a
+# written reason, and the refusal prints the exact line to paste. Widening this
+# file is a normal, expected part of active development -- a one-line change in
+# one PR, not a security event and not a release train. The gate refuses a
+# stale entry, so the file ratchets shut rather than accumulating excuses.
+#
+# One class of red does NOT lift here; see READER REFUSALS at the bottom.
+#
+# Format, one entry per line:
+#
+#     <workflow file> | <rule> | <where> | <reason>
+#
+# `<rule>` is one of: continue-on-error, env-shadow, custom-shell,
+# contract-floor.
+# `<where>` locates the construct:
+#     continue-on-error   job name, or `job/step name`
+#     env-shadow          `job/step name/ENV_KEY` for a step's own `env:`, and
+#                         -- for the three scopes no step name can address --
+#                         `<workflow.env>/ENV_KEY` for the workflow-level
+#                         `env:`, `job/<job.env>/ENV_KEY` for a job's, and
+#                         `job/<container.env>/ENV_KEY` for a job container's
+#     custom-shell        `job/step name`, or -- for a default shell, which no
+#                         step name can address -- `<defaults.run.shell>` for
+#                         the workflow-level one and
+#                         `job/<defaults.run.shell>` for a job's
+#     contract-floor      the exact AGENTS.md claim text the refusal printed,
+#                         from `GO_COVERAGE_FLOOR` through the number it
+#                         states, whitespace-collapsed. This one waives a
+#                         DOCUMENT sentence rather than a workflow construct
+#                         (issue #225): use it for a sentence that names the
+#                         variable next to a number deliberately different
+#                         from the enforced floor -- a historical figure, say
+#                         -- and NOT to let the contract's statement of the
+#                         current floor drift away from what CI enforces. The
+#                         `<workflow file>` field names the workflow whose
+#                         floor is authoritative.
+# Steps are located by NAME, never by index, so inserting a step above one
+# does not invalidate its entry -- an index would be exactly the brittle
+# inventory pin this gate refuses to become.
+#
+# Every field is required. A blank reason is a hard error: an allowlist
+# without reasons is a mute button, and the next agent deserves to read WHY.
+# `#` starts a comment; blank lines are ignored.
+#
+# EMPTY BY DESIGN. Every workflow in this repository passes all three rules at
+# the head that introduced this gate: no `continue-on-error` exists anywhere,
+# no `env:` at any of the four scopes shadows an outer declaration or
+# redeclares a tool pin, and neither a step nor a `defaults.run` sets a custom
+# `shell:`. That is the state worth keeping, and an empty allowlist is the
+# honest record of it -- the seeds are absent because nothing needed seeding,
+# not because anything was waived to reach green.
+#
+# READER REFUSALS DO NOT LIFT HERE, and an earlier revision of this header
+# said they did. Stated plainly so nobody loses an afternoon to it:
+#
+# The gate produces two kinds of red. A RULE refusal is a verdict about a value
+# the reader RESOLVED -- `continue-on-error: true`, `shell: sh`, a shadowed
+# `env:` key. Those print a lift line and lift through one entry here.
+#
+# A READER refusal is raised while the file is being resolved, before any rule
+# consults this file. It prints NO lift line, and pasting an entry changes
+# nothing. The two examples this header used to offer as liftable are exactly
+# the ones that are not: `continue-on-error: ${{ true }}` and an unquoted
+# `shell:` template with spaces in it. That is the correct behaviour rather
+# than a gap -- an entry here waives a verdict about a resolved value, and
+# there is no verdict to waive when nothing resolved; silencing a construct
+# nobody can state the meaning of is the silent pass the round-3 inversion
+# exists to remove, and the entry would have to name its subject by line or by
+# raw text, since the resolved subject is precisely what is missing.
+#
+# The remedies for a reader refusal, in order:
+#   1. write the construct in block style -- GitHub Actions accepts it in every
+#      position these rules read;
+#   2. write the value in a spelling the reader resolves. Quoting usually does
+#      it: `shell: "bash -e {0}"` resolves, reddens through RULE 3, and lifts
+#      through one line here, while the same value unquoted does not;
+#   3. if the construct is genuinely needed and genuinely unresolvable, widen
+#      `resolve_scalar`'s recognised set in one reviewed edit to
+#      `test_workflow_integrity.py`. That is a gate change and is reviewed like
+#      one -- which is the point: widening what a fail-closed reader accepts is
+#      a decision, not a waiver.
+#
+# `test_a_reader_refusal_is_not_liftable_by_the_allowlist` pins both
+# directions, so this paragraph cannot drift away from the code again.

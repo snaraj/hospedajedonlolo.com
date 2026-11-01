@@ -1,0 +1,19 @@
+# Lift mechanism for scripts/ci/test_subcommand_callers.py
+#
+# That gate refuses a `release_contract.py` subcommand with NO caller in the
+# repository, and one whose ONLY caller is a test. Both refusals are lifted
+# here, one line each, with a written reason. Widening this file is a normal,
+# expected part of active development -- a one-line change in one PR, not a
+# security event and not a release train. Narrowing it (deleting an entry once
+# a real caller lands) is the ratchet: the gate itself fails on a stale entry,
+# so this file cannot silently accumulate excuses.
+#
+# Format, one entry per line:
+#
+#     <subcommand> | <reason>
+#
+# Both fields are required. A blank reason is a hard error -- an allowlist
+# without reasons is a mute button, and the next agent deserves to read WHY.
+# `#` starts a comment; blank lines are ignored. An entry naming a subcommand
+# the parser does not register is a hard error, and so is an entry for a
+# subcommand that has since grown a real caller.
