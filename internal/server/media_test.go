@@ -72,20 +72,65 @@ func TestCapacityExhaustionAnswers503(t *testing.T) {
 	}
 }
 
-func TestAVolumeChangedAfterVerificationIsRefused(t *testing.T) {
-	f := newFixture(t)
-	h := f.site(t).Handler()
-	if err := os.WriteFile(f.path(f.objects[0]), []byte("swapped"), 0o644); err != nil {
-		t.Fatal(err)
+// After construction the volume is out of the request path. Whatever changes
+// on the host afterwards -- a same-size overwrite in place, an atomic same-size
+// replacement, a resize or a removal -- visitors still receive exactly the
+// verified bytes under the pinned ETag, whole or by range, and readiness stays
+// true because the site can still serve all of it.
+func TestVolumeChangesAfterVerificationNeverReachVisitors(t *testing.T) {
+	const original = "webp-bytes-0123456789"
+	const forged = "WEBP-BYTES-9876543210" // same length as original
+	changes := map[string]func(*testing.T, string){
+		"same-size overwrite in place": func(t *testing.T, name string) {
+			file, err := os.OpenFile(name, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			if _, err := file.WriteAt([]byte(forged), 0); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"same-size atomic replacement": func(t *testing.T, name string) {
+			if err := os.WriteFile(name+".new", []byte(forged), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(name+".new", name); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"resize": func(t *testing.T, name string) {
+			if err := os.WriteFile(name, []byte("swapped"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"removal": func(t *testing.T, name string) {
+			if err := os.Remove(name); err != nil {
+				t.Fatal(err)
+			}
+		},
 	}
-	if w := do(t, h, http.MethodGet, "/assets/photo.webp", nil); w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "swapped") {
-		t.Fatalf("resized file served: %d %q", w.Code, w.Body.String())
-	}
-	if err := os.Remove(f.path(f.objects[0])); err != nil {
-		t.Fatal(err)
-	}
-	if w := do(t, h, http.MethodGet, "/assets/photo.webp", nil); w.Code != http.StatusInternalServerError {
-		t.Fatalf("removed file: %d", w.Code)
+	for label, change := range changes {
+		t.Run(label, func(t *testing.T) {
+			f := newFixture(t)
+			if len(forged) != len(original) || f.objects[0].Size != int64(len(original)) {
+				t.Fatal("fixture no longer matches this test's same-size premise")
+			}
+			h := f.site(t).Handler()
+			change(t, f.path(f.objects[0]))
+			etag := `"` + f.objects[0].SHA256 + `"`
+			w := do(t, h, http.MethodGet, "/assets/photo.webp", nil)
+			if w.Code != http.StatusOK || w.Body.String() != original || w.Header().Get("ETag") != etag {
+				t.Fatalf("served %d %q etag %q", w.Code, w.Body.String(), w.Header().Get("ETag"))
+			}
+			w = do(t, h, http.MethodGet, "/assets/photo.webp", map[string]string{"Range": "bytes=11-20"})
+			if w.Code != http.StatusPartialContent || w.Body.String() != original[11:] {
+				t.Fatalf("range served %d %q", w.Code, w.Body.String())
+			}
+			if w := do(t, h, http.MethodGet, "/readyz", nil); w.Code != http.StatusOK {
+				t.Fatalf("readiness: %d", w.Code)
+			}
+		})
 	}
 }
 

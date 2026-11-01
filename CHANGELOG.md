@@ -23,7 +23,9 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 - The fourteen photographs and the film are served at `/assets/<name>` from a
   read-only volume laid out as `immutable/<sha256>/<name>`. Each file is pinned
   by name, size and SHA-256, and the server hashes every pinned byte before it
-  reports ready, so it refuses to start rather than show anything else.
+  reports ready, so it refuses to start rather than show anything else. It
+  then serves those verified bytes from memory, so nothing changed on the
+  volume afterwards ever reaches a visitor.
   `scripts/stage-media.sh` copies the files into that layout and verifies them.
 - A Helm chart: two replicas that roll one at a time, the media claim mounted
   read-only, ingress only from the one named tunnel connector, and no egress at

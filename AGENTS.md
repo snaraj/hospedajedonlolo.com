@@ -159,8 +159,10 @@ Numbered for citation, repo-scoped, none negotiable in code:
     `immutable/<sha256>/<name>`, are pinned by name, size and SHA-256 in
     `site/media.go`, and are served at `/assets/<name>`. The server hashes
     every pinned byte before `/readyz` answers and refuses to start on any
-    mismatch — a missing, extra-linked, symlinked, resized or altered file —
-    so a visitor can only ever see the defined content.
+    mismatch — a missing, extra-linked, symlinked, resized or altered file.
+    It then serves only the bytes it verified, held in memory, so nothing
+    written, replaced or removed on the volume afterwards reaches a visitor:
+    a visitor can only ever see the defined content.
     `scripts/stage-media.sh` is the one way files reach that layout.
 12. **No secrets, no noncanonical personal data.** No credential, token,
     private host fact, private contact detail, or new personal data enters this

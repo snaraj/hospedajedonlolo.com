@@ -87,7 +87,8 @@ func New(cfg Config) (*Site, error) {
 // Handler returns the complete, wrapped origin handler.
 func (s *Site) Handler() http.Handler { return s.handler }
 
-// Close releases the media volume handle.
+// Close ends the Site's lifecycle. The media volume was already released when
+// New finished reading it.
 func (s *Site) Close() error { return s.media.Close() }
 
 // loadPages reads every embedded file once. The content types form a closed
@@ -140,8 +141,10 @@ func (s *Site) route(w http.ResponseWriter, r *http.Request) {
 	}
 	switch requestPath {
 	case "/livez", "/readyz":
-		// Readiness is a constant because New already verified every input
-		// the site depends on; there is no database or upstream to lose.
+		// Readiness is a constant, and that is truthful: New verified every
+		// input, and the page and media are served from the verified bytes in
+		// memory, so nothing on the volume can later change or remove them.
+		// There is no database or upstream to lose.
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)

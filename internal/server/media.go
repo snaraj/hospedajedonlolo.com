@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -19,17 +20,25 @@ import (
 
 var errUnsafeMediaPath = errors.New("unsafe media path")
 
-// mediaStore serves the pinned photographs and film from the read-only
-// volume. Files live at <root>/immutable/<sha256>/<name>, the content-addressed
-// layout naranjo.online's gallery uses, and the store only ever opens the one
-// path each pinned object names.
+// mediaStore serves the pinned photographs and film. They are read once from
+// the read-only volume, at <root>/immutable/<sha256>/<name> (the
+// content-addressed layout naranjo.online's gallery uses), and every response
+// is served from the bytes that were hashed. The volume is closed after
+// startup, so nothing later written, replaced or removed there can change or
+// withdraw what a visitor receives. Fifteen files of about 26 MiB in all fit
+// the Pod's memory limit with room to spare.
 type mediaStore struct {
-	root    *os.Root
-	objects map[string]site.Object
+	objects map[string]verifiedObject
 	slots   chan struct{}
 }
 
-// openMediaStore validates the configuration, then opens and hashes every
+// verifiedObject is one pin together with the exact bytes that matched it.
+type verifiedObject struct {
+	site.Object
+	data []byte
+}
+
+// openMediaStore validates the configuration, then reads and hashes every
 // pinned file. Errors never name a filesystem path: the mount point is an
 // operator fact, not something a log reader needs.
 func openMediaStore(root string, maxConcurrent int, objects []site.Object) (*mediaStore, error) {
@@ -44,18 +53,19 @@ func openMediaStore(root string, maxConcurrent int, objects []site.Object) (*med
 	if err != nil {
 		return nil, errors.New("media root is unavailable")
 	}
-	store := &mediaStore{root: opened, objects: make(map[string]site.Object, len(objects)), slots: make(chan struct{}, maxConcurrent)}
+	defer opened.Close()
+	store := &mediaStore{objects: make(map[string]verifiedObject, len(objects)), slots: make(chan struct{}, maxConcurrent)}
 	for _, object := range objects {
-		if err := store.admit(object); err != nil {
-			store.Close()
+		if err := store.admit(opened, object); err != nil {
 			return nil, err
 		}
 	}
 	return store, nil
 }
 
-// admit checks one pinned object's declaration and then its bytes.
-func (s *mediaStore) admit(object site.Object) error {
+// admit checks one pinned object's declaration, then reads exactly its pinned
+// size and keeps those bytes only if they hash to its pin.
+func (s *mediaStore) admit(root *os.Root, object site.Object) error {
 	if !mediaName.MatchString(object.Name) || !sha256Hex.MatchString(object.SHA256) || object.Size <= 0 {
 		return fmt.Errorf("media %q is not a valid pin", object.Name)
 	}
@@ -65,7 +75,7 @@ func (s *mediaStore) admit(object site.Object) error {
 	if _, duplicate := s.objects[object.Name]; duplicate {
 		return fmt.Errorf("media %s is pinned twice", object.Name)
 	}
-	file, info, err := s.openRegular(objectPath(object))
+	file, info, err := openRegular(root, objectPath(object))
 	if err != nil {
 		return fmt.Errorf("media %s is missing or unsafe on the volume", object.Name)
 	}
@@ -73,24 +83,30 @@ func (s *mediaStore) admit(object site.Object) error {
 	if info.Size() != object.Size {
 		return fmt.Errorf("media %s has the wrong size", object.Name)
 	}
-	digest := sha256.New()
-	if _, err := io.Copy(digest, file); err != nil {
+	// Read exactly the pinned size, then require end of file: a file that grew
+	// after the size check is refused rather than truncated into a match.
+	data := make([]byte, object.Size)
+	if _, err := io.ReadFull(file, data); err != nil {
 		return fmt.Errorf("media %s is unreadable", object.Name)
 	}
-	if hex.EncodeToString(digest.Sum(nil)) != object.SHA256 {
+	if n, err := file.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		return fmt.Errorf("media %s has the wrong size", object.Name)
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != object.SHA256 {
 		return fmt.Errorf("media %s does not match its pinned digest", object.Name)
 	}
-	s.objects[object.Name] = object
+	s.objects[object.Name] = verifiedObject{Object: object, data: data}
 	return nil
 }
 
-// Close releases the volume handle.
-func (s *mediaStore) Close() error { return s.root.Close() }
+// Close is kept for the Site's lifecycle; the volume was released at startup.
+func (s *mediaStore) Close() error { return nil }
 
-// lookup maps a request name such as "assets/hero.webp" to its pinned object.
-func (s *mediaStore) lookup(name string) (site.Object, bool) {
+// lookup maps a request name such as "assets/hero.webp" to its verified object.
+func (s *mediaStore) lookup(name string) (verifiedObject, bool) {
 	if !strings.HasPrefix(name, assetsPrefix) {
-		return site.Object{}, false
+		return verifiedObject{}, false
 	}
 	object, ok := s.objects[strings.TrimPrefix(name, assetsPrefix)]
 	return object, ok
@@ -100,10 +116,10 @@ func objectPath(object site.Object) string {
 	return path.Join("immutable", object.SHA256, object.Name)
 }
 
-// serve streams one pinned object with Range support. A bounded number of
+// serve streams one verified object with Range support. A bounded number of
 // transfers run at once; beyond that the Pod answers 503 rather than queue
 // visitors behind a slow download.
-func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object site.Object) {
+func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object verifiedObject) {
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
@@ -113,17 +129,6 @@ func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object site.O
 		http.Error(w, "media capacity unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	file, info, err := s.openRegular(objectPath(object))
-	if err != nil || info.Size() != object.Size {
-		if file != nil {
-			file.Close()
-		}
-		// The volume changed underneath a verified Site. Refuse loudly
-		// instead of serving bytes nobody pinned.
-		http.Error(w, "media unavailable", http.StatusInternalServerError)
-		return
-	}
-	defer file.Close()
 	etag := `"` + object.SHA256 + `"`
 	header := w.Header()
 	header.Set("Cache-Control", assetCacheControl)
@@ -131,24 +136,24 @@ func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object site.O
 	header.Set("Content-Type", object.ContentType)
 	header.Set("ETag", etag)
 	if rangeHeaderIsAbusive(r.Header.Get("Range")) && !preconditionsDisableRange(r, etag) {
-		header.Set("Content-Range", fmt.Sprintf("bytes */%d", info.Size()))
+		header.Set("Content-Range", fmt.Sprintf("bytes */%d", len(object.data)))
 		http.Error(w, "requested range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
-	http.ServeContent(w, r, object.Name, time.Time{}, file)
+	http.ServeContent(w, r, object.Name, time.Time{}, bytes.NewReader(object.data))
 }
 
 // openRegular opens a file beneath the root only if no component is a
 // symlink, every intermediate component is a directory, the final one is a
 // regular file with exactly one link, and the opened handle is the same file
 // that was inspected. A swapped, linked or special file is errUnsafeMediaPath.
-func (s *mediaStore) openRegular(name string) (*os.File, fs.FileInfo, error) {
+func openRegular(root *os.Root, name string) (*os.File, fs.FileInfo, error) {
 	segments := strings.Split(name, "/")
 	current := ""
 	var inspected fs.FileInfo
 	for index, segment := range segments {
 		current = path.Join(current, segment)
-		info, err := s.root.Lstat(current)
+		info, err := root.Lstat(current)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -160,7 +165,7 @@ func (s *mediaStore) openRegular(name string) (*os.File, fs.FileInfo, error) {
 	if inspected == nil || !inspected.Mode().IsRegular() {
 		return nil, nil, errUnsafeMediaPath
 	}
-	file, err := s.root.Open(name)
+	file, err := root.Open(name)
 	if err != nil {
 		return nil, nil, err
 	}

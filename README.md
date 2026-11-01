@@ -11,7 +11,8 @@ script and its six fonts (`site/`) are embedded in the binary byte for byte;
 the fourteen photographs and the film live on a read-only volume and are
 served at `/assets/<name>`. Every one of those files is pinned by SHA-256 —
 the embedded ones in `site/site_test.go`, the volume ones in `site/media.go` —
-and the server refuses to start if the volume does not match. There is no
+and the server refuses to start if the volume does not match, then serves
+the verified bytes from memory. There is no
 frontend build, no Node and no npm.
 
 ## Run it locally

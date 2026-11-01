@@ -236,6 +236,8 @@ jobs:
         run: ./scripts/ci/chart-egress-pin.sh
       - name: Media must render as exactly one read-only claim the process is told about
         run: ./scripts/ci/chart-media-pin.sh
+      - name: A pending release must render zero Pods
+        run: ./scripts/ci/chart-replica-pin.sh
       - name: Chart version must match VERSION
         run: |
           IFS= read -r version < VERSION
