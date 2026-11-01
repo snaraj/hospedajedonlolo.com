@@ -34,3 +34,11 @@ var Media = []Object{
 	{Name: "rockers.webp", SHA256: "b1feac61eef9088601675371bc4d2b5afbdda3490bdb107c01e58e8b387c0be4", Size: 437452, ContentType: "image/webp"},
 	{Name: "terrace.webp", SHA256: "f1786cb095adaf1592351a70fadaff18bad4b7dd2d0c8cbb3cc2fd382b54302d", Size: 354084, ContentType: "image/webp"},
 }
+
+// Withheld names pinned media that stays on the volume and is verified at
+// startup, but is not delivered. The film is withheld under the platform's
+// zero-spend boundary for public video (snaraj/platform safety invariant 13):
+// on a self-serve plan, video through the proxied edge needs a paid service,
+// and only the owner can lift that boundary. The page keeps its poster image.
+// Delivering the film is removing its name here, after that owner decision.
+var Withheld = []string{"don-lolo.mp4"}

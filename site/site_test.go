@@ -131,4 +131,9 @@ func TestMediaPinsAreWellFormed(t *testing.T) {
 	if len(Media) != 15 {
 		t.Errorf("the delivered page uses 15 media files, the table pins %d", len(Media))
 	}
+	for _, name := range Withheld {
+		if !names[name] {
+			t.Errorf("withheld %s is not a pinned media file", name)
+		}
+	}
 }

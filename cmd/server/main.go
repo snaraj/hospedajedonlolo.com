@@ -37,17 +37,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger := newLogger(os.Stdout, isTerminal(os.Stdout), os.Getenv)
-	if err := run(ctx, logger, os.Getenv, nil, site.Pages, site.Media); err != nil {
+	pages, media, withheld := productionInputs()
+	if err := run(ctx, logger, os.Getenv, nil, pages, media, withheld); err != nil {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("server exited")
 }
 
+// productionInputs is the published site: the embedded page, the pinned media
+// and the media that is verified but withheld from delivery.
+func productionInputs() (fs.FS, []site.Object, []string) {
+	return site.Pages, site.Media, site.Withheld
+}
+
 // run builds the site from the environment and serves until ctx ends. A nil
-// listener means "listen on PORT"; tests pass their own listener, pages and
-// media so the whole start-serve-drain path runs against a fixture volume.
-func run(ctx context.Context, logger *slog.Logger, getenv func(string) string, listener net.Listener, pages fs.FS, media []site.Object) error {
+// listener means "listen on PORT"; tests pass their own listener, pages, media
+// and withheld names so the whole start-serve-drain path runs against a
+// fixture volume.
+func run(ctx context.Context, logger *slog.Logger, getenv func(string) string, listener net.Listener, pages fs.FS, media []site.Object, withheld []string) error {
 	port, err := listenPort(getenv("PORT"))
 	if err != nil {
 		return err
@@ -61,6 +69,7 @@ func run(ctx context.Context, logger *slog.Logger, getenv func(string) string, l
 		Media:              media,
 		MediaRoot:          getenv("MEDIA_ROOT"),
 		MediaMaxConcurrent: maxConcurrent,
+		Withheld:           withheld,
 		Logger:             logger,
 	})
 	if err != nil {

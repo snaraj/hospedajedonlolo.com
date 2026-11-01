@@ -29,8 +29,9 @@ media:
 resources:
   requests:
     cpu: 25m
-    # The verified photographs and film (about 26 MiB) are held in memory, so
-    # the request covers them plus the runtime rather than understating use.
+    # Verified media is held in memory: the photographs now, and the film too
+    # once it is delivered (about 26 MiB in all). The request covers that plus
+    # the runtime rather than understating use.
     memory: 64Mi
   limits:
     cpu: 200m

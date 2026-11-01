@@ -12,7 +12,9 @@ the fourteen photographs and the film live on a read-only volume and are
 served at `/assets/<name>`. Every one of those files is pinned by SHA-256 —
 the embedded ones in `site/site_test.go`, the volume ones in `site/media.go` —
 and the server refuses to start if the volume does not match, then serves
-the verified bytes from memory. There is no
+the verified bytes from memory. The film is verified but withheld from
+delivery (`site.Withheld`) until the owner lifts the platform's zero-spend
+boundary for public video; the page shows its poster meanwhile. There is no
 frontend build, no Node and no npm.
 
 ## Run it locally

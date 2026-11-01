@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -116,7 +117,7 @@ func TestRunServesThenDrainsOnSignal(t *testing.T) {
 	var logs bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, slog.New(slog.NewJSONHandler(&logs, nil)), func(k string) string { return env[k] }, listener, site.Pages, media)
+		done <- run(ctx, slog.New(slog.NewJSONHandler(&logs, nil)), func(k string) string { return env[k] }, listener, site.Pages, media, nil)
 	}()
 	base := "http://" + listener.Addr().String()
 	var response *http.Response
@@ -162,12 +163,12 @@ func TestRunRefusesBadConfigurationBeforeListening(t *testing.T) {
 		"wrong media bytes": {"MEDIA_ROOT": t.TempDir(), "MEDIA_MAX_CONCURRENT": "2"},
 	}
 	for name, env := range cases {
-		err := run(context.Background(), slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, nil, site.Pages, media)
+		err := run(context.Background(), slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, nil, site.Pages, media, nil)
 		if err == nil {
 			t.Fatalf("%s: started", name)
 		}
 	}
-	err := run(context.Background(), slog.New(slog.DiscardHandler), func(string) string { return "" }, nil, fstest.MapFS{}, media)
+	err := run(context.Background(), slog.New(slog.DiscardHandler), func(string) string { return "" }, nil, fstest.MapFS{}, media, nil)
 	if err == nil {
 		t.Fatal("empty pages started")
 	}
@@ -186,12 +187,12 @@ func TestRunReportsListenAndServeFailures(t *testing.T) {
 	env := map[string]string{"PORT": itoa(port), "MEDIA_ROOT": root, "MEDIA_MAX_CONCURRENT": "1"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := run(ctx, slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, nil, site.Pages, media); err == nil {
+	if err := run(ctx, slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, nil, site.Pages, media, nil); err == nil {
 		t.Fatal("listening on an occupied port succeeded")
 	}
 	closed, _ := net.Listen("tcp", "127.0.0.1:0")
 	closed.Close()
-	if err := run(context.Background(), slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, closed, site.Pages, media); err == nil {
+	if err := run(context.Background(), slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, closed, site.Pages, media, nil); err == nil {
 		t.Fatal("serving on a closed listener succeeded")
 	}
 }
@@ -205,6 +206,13 @@ func itoa(n int) string {
 		digits = append([]byte{byte('0' + n%10)}, digits...)
 	}
 	return string(digits)
+}
+
+func TestProductionInputsAreThePublishedSite(t *testing.T) {
+	pages, media, withheld := productionInputs()
+	if pages != site.Pages || len(media) != len(site.Media) || !slices.Equal(withheld, site.Withheld) || len(withheld) == 0 {
+		t.Fatalf("production inputs drifted from the site package: %d media, withheld %v", len(media), withheld)
+	}
 }
 
 func TestIsTerminal(t *testing.T) {
