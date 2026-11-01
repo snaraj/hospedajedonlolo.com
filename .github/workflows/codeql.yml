@@ -29,6 +29,13 @@ jobs:
   analyze:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # The only JavaScript is the owner's delivered site/app.js, served byte
+      # for byte. Its lines average just over 200 characters, so CodeQL's
+      # JavaScript extractor would skip it as minified and the job would fail
+      # with "could not process any code". This switch, read only by that
+      # extractor, analyses the file as it is; the file is never reformatted.
+      CODEQL_EXTRACTOR_JAVASCRIPT_ALLOW_MINIFIED_FILES: 'true'
     permissions:
       contents: read
       security-events: write
