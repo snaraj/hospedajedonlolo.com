@@ -51,18 +51,17 @@ func productionInputs() (fs.FS, []site.Object, []string) {
 	return site.Pages, site.Media, site.Withheld
 }
 
-// run builds the site from the environment and serves until ctx ends. A nil
-// listener means "listen on PORT"; tests pass their own listener, pages, media
-// and withheld names so the whole start-serve-drain path runs against a
-// fixture volume.
-func run(ctx context.Context, logger *slog.Logger, getenv func(string) string, listener net.Listener, pages fs.FS, media []site.Object, withheld []string) error {
+// buildSite validates the environment and builds the verified site exactly as
+// run serves it, withheld media included. It opens no socket, so the whole
+// configuration path is testable on its own.
+func buildSite(logger *slog.Logger, getenv func(string) string, pages fs.FS, media []site.Object, withheld []string) (*server.Site, int, int, error) {
 	port, err := listenPort(getenv("PORT"))
 	if err != nil {
-		return err
+		return nil, 0, 0, err
 	}
 	maxConcurrent, err := mediaConcurrency(getenv("MEDIA_MAX_CONCURRENT"))
 	if err != nil {
-		return err
+		return nil, 0, 0, err
 	}
 	origin, err := server.New(server.Config{
 		Pages:              pages,
@@ -72,6 +71,18 @@ func run(ctx context.Context, logger *slog.Logger, getenv func(string) string, l
 		Withheld:           withheld,
 		Logger:             logger,
 	})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return origin, port, maxConcurrent, nil
+}
+
+// run builds the site from the environment and serves until ctx ends. A nil
+// listener means "listen on PORT"; tests pass their own listener, pages, media
+// and withheld names so the whole start-serve-drain path runs against a
+// fixture volume.
+func run(ctx context.Context, logger *slog.Logger, getenv func(string) string, listener net.Listener, pages fs.FS, media []site.Object, withheld []string) error {
+	origin, port, maxConcurrent, err := buildSite(logger, getenv, pages, media, withheld)
 	if err != nil {
 		return err
 	}

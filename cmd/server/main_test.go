@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -106,8 +107,52 @@ func fixtureVolume(t *testing.T) (string, []site.Object) {
 	return root, []site.Object{{Name: "hero.webp", SHA256: digest, Size: int64(len(data)), ContentType: "image/webp"}}
 }
 
+// withFilm stages a pinned film beside the fixture photograph.
+func withFilm(t *testing.T, root string, media []site.Object) ([]site.Object, []byte, string) {
+	t.Helper()
+	film := []byte("mp4-fixture-bytes")
+	sum := sha256.Sum256(film)
+	digest := hex.EncodeToString(sum[:])
+	if err := os.MkdirAll(filepath.Join(root, "immutable", digest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "immutable", digest, "film.mp4")
+	if err := os.WriteFile(path, film, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return append(media, site.Object{Name: "film.mp4", SHA256: digest, Size: int64(len(film)), ContentType: "video/mp4"}), film, path
+}
+
+// TestBuildSiteWithholdsWhatItIsGiven drives the configuration path run uses,
+// without a socket: a withheld film must stay pinned and verified, answer 404,
+// and leave the photograph beside it served.
+func TestBuildSiteWithholdsWhatItIsGiven(t *testing.T) {
+	root, media := fixtureVolume(t)
+	media, film, filmPath := withFilm(t, root, media)
+	env := map[string]string{"MEDIA_ROOT": root, "MEDIA_MAX_CONCURRENT": "2"}
+	origin, _, _, err := buildSite(slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, site.Pages, media, []string{"film.mp4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer origin.Close()
+	for path, want := range map[string]int{"/assets/film.mp4": http.StatusNotFound, "/assets/hero.webp": http.StatusOK} {
+		w := httptest.NewRecorder()
+		origin.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != want || (want == http.StatusNotFound && strings.Contains(w.Body.String(), string(film))) {
+			t.Fatalf("%s: %d, want %d", path, w.Code, want)
+		}
+	}
+	if err := os.Remove(filmPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := buildSite(slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, site.Pages, media, []string{"film.mp4"}); err == nil {
+		t.Fatal("a withheld film missing from the volume was accepted")
+	}
+}
+
 func TestRunServesThenDrainsOnSignal(t *testing.T) {
 	root, media := fixtureVolume(t)
+	media, film, _ := withFilm(t, root, media)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +162,7 @@ func TestRunServesThenDrainsOnSignal(t *testing.T) {
 	var logs bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, slog.New(slog.NewJSONHandler(&logs, nil)), func(k string) string { return env[k] }, listener, site.Pages, media, nil)
+		done <- run(ctx, slog.New(slog.NewJSONHandler(&logs, nil)), func(k string) string { return env[k] }, listener, site.Pages, media, []string{"film.mp4"})
 	}()
 	base := "http://" + listener.Addr().String()
 	var response *http.Response
@@ -133,6 +178,15 @@ func TestRunServesThenDrainsOnSignal(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK || string(body) != "webp-fixture" {
 		t.Fatalf("media through the real server: %d %q", response.StatusCode, body)
+	}
+	withheld, err := http.Get(base + "/assets/film.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withheldBody, _ := io.ReadAll(withheld.Body)
+	withheld.Body.Close()
+	if withheld.StatusCode != http.StatusNotFound || bytes.Contains(withheldBody, film) {
+		t.Fatalf("withheld film through the real server: %d", withheld.StatusCode)
 	}
 	page, err := http.Get(base + "/")
 	if err != nil {
