@@ -1,0 +1,7 @@
+coverage.out
+*.cover.out
+.DS_Store
+__pycache__/
+
+# Agent worktrees (see AGENTS.md, "Parallel agents in one checkout").
+.claude/worktrees/
