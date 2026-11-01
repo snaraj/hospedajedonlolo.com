@@ -1,0 +1,1092 @@
+name: Release publisher
+
+# Publishes ONLY when the successful-main orchestrator explicitly dispatches
+# the workflow definition on protected main with its exact source SHA and
+# completed PR-gate run ID. A token-created tag does not recursively trigger
+# push workflows, so workflow_dispatch is the explicit handoff, but an ordinary
+# manual dispatch cannot cross the read-only successful-main authorization job.
+# There is no skip flag, force path, or way to reassign a tag.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact successful main-CI commit bound to this tag
+        required: true
+        type: string
+      main_run_id:
+        description: Authoritative successful PR-gate push run on main
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/snaraj/hospedajedonlolo-com
+  CHART: ghcr.io/snaraj/charts/hospedajedonlolo-com
+
+jobs:
+  authorize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      source_sha: ${{ steps.main_run.outputs.source_sha }}
+    steps:
+      - name: Check out protected publisher authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: authority
+          persist-credentials: false
+      - name: Bind dispatch to one successful protected-main PR gate
+        id: main_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAIN_RUN_ID: ${{ inputs.main_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${MAIN_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          run_json="${RUNNER_TEMP}/publisher-main-run.json"
+          jobs_json="${RUNNER_TEMP}/publisher-main-jobs.json"
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}" > "${run_json}"
+          authorized_sha="$(python3 -I -B authority/scripts/ci/release_contract.py \
+            main-run-record --run-json "${run_json}" \
+            --run-id "${MAIN_RUN_ID}" --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}")"
+          test "${authorized_sha}" = "${SOURCE_SHA}"
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}/jobs?filter=latest&per_page=100" > "${jobs_json}"
+          jobs_sha="$(python3 -I -B authority/scripts/ci/release_contract.py \
+            main-jobs-record --jobs-json "${jobs_json}" \
+            --run-id "${MAIN_RUN_ID}" --source-sha "${SOURCE_SHA}")"
+          test "${jobs_sha}" = "${SOURCE_SHA}"
+          codeql_runs="${RUNNER_TEMP}/publisher-codeql-runs.json"
+          codeql_jobs="${RUNNER_TEMP}/publisher-codeql-jobs.json"
+          codeql_run_id=pending
+          for attempt in {1..36}; do
+            gh api --method GET \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/codeql.yml/runs" \
+              -f branch=main -f event=push -f head_sha="${SOURCE_SHA}" \
+              -f per_page=100 > "${codeql_runs}"
+            codeql_run_id="$(python3 -I -B authority/scripts/ci/release_contract.py \
+              codeql-run-record --runs-json "${codeql_runs}" \
+              --repository "${GITHUB_REPOSITORY}" --source-sha "${SOURCE_SHA}")"
+            if [ "${codeql_run_id}" != pending ]; then
+              break
+            fi
+            if [ "${attempt}" -eq 36 ]; then
+              printf 'exact-source CodeQL run did not complete within the authorization deadline\n' >&2
+              exit 1
+            fi
+            sleep 15
+          done
+          [[ "${codeql_run_id}" =~ ^[1-9][0-9]*$ ]]
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${codeql_run_id}/jobs?filter=latest&per_page=100" > "${codeql_jobs}"
+          codeql_sha="$(python3 -I -B authority/scripts/ci/release_contract.py \
+            codeql-jobs-record --jobs-json "${codeql_jobs}" \
+            --run-id "${codeql_run_id}" --source-sha "${SOURCE_SHA}")"
+          test "${codeql_sha}" = "${SOURCE_SHA}"
+          printf 'source_sha=%s\n' "${authorized_sha}" >> "${GITHUB_OUTPUT}"
+
+  repository_settings:
+    # Read-only settings preflight under this job's own short-lived
+    # `github.token` (contents: read). No App token and no stored credential:
+    # the receipt holds exactly what that token can read on a public
+    # repository, and the Administration-only surfaces are owner-verified
+    # (docs/release-governance.md, "Which side proves which invariant").
+    needs: authorize
+    if: needs.authorize.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: platform-release
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the authorized settings validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+      - name: Require authoritative release settings before side effects
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP}/release-settings-receipt.json"
+          python3 -I -B scripts/ci/release_contract.py settings-preflight \
+            --repository "${GITHUB_REPOSITORY}" > "${receipt}"
+          python3 -I -B scripts/ci/release_contract.py settings-receipt \
+            --receipt "${receipt}" --repository "${GITHUB_REPOSITORY}"
+
+  publish:
+    needs: [authorize, repository_settings]
+    if: >-
+      needs.authorize.result == 'success' &&
+      needs.repository_settings.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    env:
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      MAIN_RUN_ID: ${{ inputs.main_run_id }}
+    steps:
+      - name: Check out the authorized successful-main source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Bind protected workflow, authorized checkout, and committed locks
+        run: |
+          set -euo pipefail
+          checkout_sha="$(git rev-parse HEAD)"
+          python3 -I -B scripts/ci/release_contract.py publisher \
+            --root . \
+            --source-sha "${SOURCE_SHA}" \
+            --checkout-sha "${checkout_sha}" \
+            --ref "${GITHUB_REF}" \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --image "${IMAGE}" \
+            --chart "${CHART}"
+      - name: Install checksum-verified tools
+        run: ./scripts/ci/install-tools.sh
+      - name: Enforce numeric VERSION and plain-v release locks
+        id: release
+        run: |
+          set -euo pipefail
+          IFS= read -r version < VERSION
+          tag="v${version}"
+          chart_version="$(awk '/^version:/{print $2; exit}' chart/Chart.yaml)"
+          app_version="$(awk '/^appVersion:/{gsub(/"/,"",$2); print $2; exit}' chart/Chart.yaml)"
+          test "${tag}" = "v${version}"
+          test "${chart_version}" = "${version}"
+          test "${app_version}" = "${version}"
+          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
+          printf 'tag=%s\n' "${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Create or verify the exact annotated tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ref_json="${RUNNER_TEMP}/publisher-tag-ref.json"
+          tag_json="${RUNNER_TEMP}/publisher-tag-object.json"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          api_version='2026-03-10'
+          tagger_name='github-actions[bot]'
+          tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
+          tagger_date="$(git show -s --format=%cI "${SOURCE_SHA}")"
+          message="Release ${TAG} from ${SOURCE_SHA}"
+
+          get_json() {
+            local url="$1" output="$2"
+            curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${output}" --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header "X-GitHub-Api-Version: ${api_version}" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${url}"
+          }
+
+          classify_tag() {
+            local required="$1" status tag_object object_status
+            local -a record_args=()
+            status="$(get_json "${api}/git/ref/tags/${TAG}" "${ref_json}")"
+            if [ "${status}" = 200 ]; then
+              tag_object="$(jq -er '.object.sha' "${ref_json}")"
+              object_status="$(get_json "${api}/git/tags/${tag_object}" "${tag_json}")"
+              test "${object_status}" = 200
+              record_args=(--ref-json "${ref_json}" --tag-json "${tag_json}")
+            fi
+            python3 -I -B scripts/ci/release_contract.py tag-state \
+              --http-status "${status}" --require "${required}" "${record_args[@]}" \
+              --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+              --message "${message}" --tagger-name "${tagger_name}" \
+              --tagger-email "${tagger_email}" --tagger-date "${tagger_date}"
+          }
+
+          if classify_tag exact >/dev/null 2>&1; then
+            printf 'verified existing %s at %s\n' "${TAG}" "${SOURCE_SHA}"
+          else
+            classify_tag absent >/dev/null
+            tag_object="$(gh api --method POST \
+              --header 'Accept: application/vnd.github+json' \
+              --header "X-GitHub-Api-Version: ${api_version}" \
+              "repos/${GITHUB_REPOSITORY}/git/tags" \
+              -f tag="${TAG}" -f message="${message}" -f object="${SOURCE_SHA}" \
+              -f type=commit -f "tagger[name]=${tagger_name}" \
+              -f "tagger[email]=${tagger_email}" -f "tagger[date]=${tagger_date}" \
+              --jq '.sha')"
+            if ! gh api --method POST \
+              --header 'Accept: application/vnd.github+json' \
+              --header "X-GitHub-Api-Version: ${api_version}" \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${tag_object}" >/dev/null; then
+              printf 'tag ref create did not succeed; checking for an exact concurrent winner\n' >&2
+            fi
+            tag_race_verified=false
+            for attempt in 1 2 3 4 5; do
+              if classify_tag exact >/dev/null 2>&1; then
+                tag_race_verified=true
+                break
+              fi
+              sleep "${attempt}"
+            done
+            test "${tag_race_verified}" = true
+            classify_tag exact >/dev/null
+          fi
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Classify an absent, complete, or burned image tag
+        id: image_state
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repository="${IMAGE#ghcr.io/}"
+          token_file="${RUNNER_TEMP}/image-registry-token.json"
+          credentials="${RUNNER_TEMP}/ghcr.netrc"
+          required_platforms=(linux/amd64 linux/arm64)
+          expected_evidence="${#required_platforms[@]}"
+          trap 'rm -f -- "${token_file}" "${credentials}"' EXIT
+          umask 077
+          printf 'machine ghcr.io\nlogin %s\npassword %s\n' \
+            "${GITHUB_ACTOR}" "${GHCR_PASSWORD}" > "${credentials}"
+          curl --fail-with-body --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
+            --get --data-urlencode "scope=repository:${repository}:pull" \
+            'https://ghcr.io/token' > "${token_file}"
+          token="$(jq -er '.token // .access_token' "${token_file}")"
+          rm -f -- "${token_file}" "${credentials}"
+          manifest="${RUNNER_TEMP}/existing-image-manifest.json"
+          headers="${RUNNER_TEMP}/existing-image-headers.txt"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${manifest}" \
+            --dump-header "${headers}" --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${repository}/manifests/${TAG}")"
+          registry_state="$(python3 -I -B scripts/ci/release_contract.py registry-state --http-status "${status}")"
+          if [ "${registry_state}" = absent ]; then
+            state="$(python3 -I -B scripts/ci/release_contract.py artifact-state \
+              --present false --source-match false --signature-match false \
+              --evidence-count 0 --expected-evidence "${expected_evidence}")"
+            printf 'state=%s\ndigest=\n' "${state}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          digest="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "${headers}" | tail -n 1)"
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          computed="sha256:$(sha256sum "${manifest}" | awk '{print $1}')"
+          test "${computed}" = "${digest}"
+          source_match=true
+          expected_platforms="${required_platforms[*]}"
+          source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          provenance="${RUNNER_TEMP}/existing-image-provenance.json"
+          if ! docker buildx imagetools inspect "${IMAGE}@${digest}" \
+            --format '{{ json .Provenance }}' > "${provenance}"; then
+            source_match=false
+          fi
+          provenance_platforms="$(jq -r 'keys[]' "${provenance}" 2>/dev/null | paste -sd ' ' - || true)"
+          if [ "${provenance_platforms}" != "${expected_platforms}" ]; then
+            source_match=false
+          fi
+          verify_sbom_set() {
+            local plan platform prefix subject_digest attestation_digest
+            local attestation headers status observed computed layer_digest statement
+            plan="${RUNNER_TEMP}/existing-image-sbom-plan.json"
+            python3 -I -B scripts/ci/release_contract.py sbom-index-record \
+              --index "${manifest}" --image-digest "${digest}" --output "${plan}"
+            for platform in "${required_platforms[@]}"; do
+              prefix="existing-sbom-${platform//\//-}"
+              subject_digest="$(jq -er --arg platform "${platform}" \
+                '.[$platform].subject_digest' "${plan}")"
+              attestation_digest="$(jq -er --arg platform "${platform}" \
+                '.[$platform].attestation_digest' "${plan}")"
+              attestation="${RUNNER_TEMP}/${prefix}-manifest.json"
+              headers="${RUNNER_TEMP}/${prefix}-headers.txt"
+              status="$(curl --silent --show-error --location \
+                --proto '=https' --tlsv1.2 --output "${attestation}" \
+                --dump-header "${headers}" --write-out '%{http_code}' \
+                --header "Authorization: Bearer ${token}" \
+                --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+                "https://ghcr.io/v2/${repository}/manifests/${attestation_digest}")"
+              test "$(python3 -I -B scripts/ci/release_contract.py registry-state \
+                --http-status "${status}")" = present
+              observed="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "${headers}" | tail -n 1)"
+              computed="sha256:$(sha256sum "${attestation}" | awk '{print $1}')"
+              test "${observed}" = "${attestation_digest}"
+              test "${computed}" = "${attestation_digest}"
+              layer_digest="$(python3 -I -B scripts/ci/release_contract.py sbom-layer-record \
+                --manifest "${attestation}" --attestation-digest "${attestation_digest}")"
+              statement="${RUNNER_TEMP}/${prefix}-statement.json"
+              curl --fail-with-body --silent --show-error --location \
+                --proto '=https' --tlsv1.2 --output "${statement}" \
+                --header "Authorization: Bearer ${token}" \
+                "https://ghcr.io/v2/${repository}/blobs/${layer_digest}"
+              python3 -I -B scripts/ci/release_contract.py sbom-statement \
+                --statement "${statement}" --layer-digest "${layer_digest}" \
+                --image "${IMAGE}" --subject-digest "${subject_digest}" \
+                --platform "${platform}" >/dev/null
+            done
+          }
+          if ! verify_sbom_set; then
+            source_match=false
+          fi
+          expected_attestations=()
+          # These bytes were NOT built by this run: reaching this branch means
+          # an earlier publisher attempt for this same source SHA already
+          # pushed the tag, and the retry is deciding whether that artifact is
+          # exactly what it would publish. GITHUB_RUN_ID is therefore the WRONG
+          # binding here -- it would classify every recoverable retry `burned`
+          # -- so the run identity is read once, from the first platform's
+          # predicate, and then required of every platform: the two per-platform
+          # predicates can no longer name different runs, and the shell's
+          # extraction is only a candidate, since the contract re-derives the
+          # complete `<source>/actions/runs/<id>[/attempts/<n>]` form and denies
+          # anything else. The external anchor for these bytes is the cosign
+          # certificate identity checked below (this workflow on refs/heads/main)
+          # plus the exact `vcs.revision` binding inside the SIGNED predicate,
+          # which the statement-set comparison below weighs byte for byte
+          # (issue #137).
+          builder_run_id=''
+          for platform in "${required_platforms[@]}"; do
+            predicate="${RUNNER_TEMP}/existing-${platform//\//-}.json"
+            statement="${RUNNER_TEMP}/existing-${platform//\//-}.statement.json"
+            modified_predicate="${RUNNER_TEMP}/existing-${platform//\//-}.predicate.json"
+            if ! docker buildx imagetools inspect "${IMAGE}@${digest}" \
+              --format "{{ json (index .Provenance \"${platform}\").SLSA }}" > "${predicate}"; then
+              source_match=false
+              continue
+            fi
+            if [ -z "${builder_run_id}" ]; then
+              if ! builder_id="$(jq -er '.runDetails.builder.id' "${predicate}")"; then
+                source_match=false
+                continue
+              fi
+              builder_run_id="${builder_id#"${source}/actions/runs/"}"
+              builder_run_id="${builder_run_id%%/*}"
+            fi
+            if ! python3 -I -B scripts/ci/release_contract.py attestation-statement \
+              --predicate "${predicate}" --output "${statement}" \
+              --predicate-output "${modified_predicate}" \
+              --image "${IMAGE}" --digest "${digest}" --source "${source}" \
+              --revision "${SOURCE_SHA}" --platform "${platform}" \
+              --builder-run-id "${builder_run_id}"; then
+              source_match=false
+              continue
+            fi
+            expected_attestations+=(--expected "${platform}=${statement}")
+          done
+
+          signature_match=false
+          verified_count=0
+          verified="${RUNNER_TEMP}/verified-existing-attestations.json"
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release-publisher.yml@refs/heads/main"
+          if [ "${source_match}" = true ] && \
+             cosign verify \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              "${IMAGE}@${digest}" >/dev/null 2>&1 && \
+             cosign verify-attestation --type slsaprovenance1 --output json \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              "${IMAGE}@${digest}" > "${verified}" 2>/dev/null && \
+             python3 -I -B scripts/ci/release_contract.py attestation-set \
+              --verified "${verified}" "${expected_attestations[@]}" > "${RUNNER_TEMP}/verified-attestation-count.txt"; then
+            validated_count="$(<"${RUNNER_TEMP}/verified-attestation-count.txt")"
+            signature_match=true
+            verified_count="${validated_count}"
+          fi
+          set +e
+          state="$(python3 -I -B scripts/ci/release_contract.py artifact-state \
+            --present true --source-match "${source_match}" \
+            --signature-match "${signature_match}" \
+            --evidence-count "${verified_count}" \
+            --expected-evidence "${expected_evidence}")"
+          classifier_status=$?
+          set -e
+          printf 'existing image state: %s\n' "${state}"
+          test "${classifier_status}" -eq 0
+          printf 'state=%s\ndigest=%s\n' "${state}" "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Log in to GHCR
+        if: steps.image_state.outputs.state == 'absent'
+        run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build and publish both production architectures
+        if: steps.image_state.outputs.state == 'absent'
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Semantic version only: the commit SHA lives in labels, never as a
+          # human-facing tag (package-page clarity is a product feature).
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.release.outputs.tag }}
+          labels: |
+            org.opencontainers.image.title=hospedajedonlolo.com
+            org.opencontainers.image.description=Go service embedding the built Svelte frontend for hospedajedonlolo.com
+            org.opencontainers.image.source=https://github.com/snaraj/hospedajedonlolo.com
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.authorize.outputs.source_sha }}
+            org.opencontainers.image.licenses=MIT
+          provenance: mode=max
+          sbom: true
+      - name: Resolve the one image digest for later stages
+        id: image
+        env:
+          EXISTING_DIGEST: ${{ steps.image_state.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_STATE: ${{ steps.image_state.outputs.state }}
+        run: |
+          set -euo pipefail
+          if [ "${IMAGE_STATE}" = complete ]; then
+            digest="${EXISTING_DIGEST}"
+          elif [ "${IMAGE_STATE}" = absent ]; then
+            digest="${BUILT_DIGEST}"
+          else
+            printf 'unpublishable image state %s\n' "${IMAGE_STATE}" >&2
+            exit 1
+          fi
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Reject high or critical vulnerabilities in the final image digest
+        # POSITION IS THE CONTRACT: this gate runs immediately after digest
+        # resolution and BEFORE cosign sign/attest, so a digest that fails
+        # HIGH/CRITICAL never receives this repository's release identity
+        # (issue #69 -- v0.1.15 was signed and only then gated, leaving a
+        # signed vulnerable image in GHCR). The gate is unconditional: it
+        # covers the freshly built `absent` path and the reused `complete`
+        # path alike, so a previously clean digest is rescanned against
+        # today's vulnerability database. `require_exact_release_wiring`
+        # pins digest < gate < sign < attest; moving this step back below
+        # signing fails the contract suite.
+        #
+        # --include-dev-deps is a source/lockfile concept (npm, etc.) that
+        # `trivy fs` understands; the installed trivy rejects it as an
+        # unknown flag on `trivy image` (issue #73), so this step FATALed
+        # before scanning anything and the final digest was never gated.
+        run: >-
+          trivy image --scanners vuln
+          --severity HIGH,CRITICAL --exit-code 1
+          --ignore-unfixed=false --timeout 10m
+          --cache-dir "${RUNNER_TEMP}/trivy-image-cache"
+          "${IMAGE}@${{ steps.image.outputs.digest }}"
+      - name: Sign the immutable image digest
+        if: steps.image_state.outputs.state == 'absent'
+        run: cosign sign --yes "${IMAGE}@${{ steps.image.outputs.digest }}"
+      - name: Attach the BuildKit SLSA provenance as cosign attestations
+        # Buildx embeds one SLSA v1 predicate per platform. Preserve each
+        # complete predicate inside an exact in-toto statement for later
+        # comparison, add a release binding to a COPY consumed only as the
+        # signed predicate, and sign that modified predicate about the
+        # immutable index digest. cosign's `attest` has no working
+        # --statement path -- PredicatePath is unconditionally required, so
+        # --predicate is the only flag that can carry it -- and --type is
+        # the literal predicate-type URI, never the "slsaprovenance1" alias:
+        # the alias resolves to cosign's strict typed SLSA decoder, which
+        # silently discards unknown fields -- BuildKit's own
+        # buildkit_metadata and buildkit_completeness. Our release binding
+        # in buildDefinition.internalParameters is NOT among them:
+        # internalParameters is typed as a google.protobuf.Struct, so
+        # protojson's unknown-field discarding never reaches it and the
+        # binding survives either path. The literal URI is still the right
+        # choice -- losing buildkit_metadata/buildkit_completeness alone
+        # already breaks this step's later exact-statement comparison, and
+        # the literal URI routes to cosign's generic/custom path, which
+        # embeds the predicate verbatim instead of dropping anything. The
+        # final decision is made only from cosign's cryptographically
+        # verified output, never from an unauthenticated download count.
+        #
+        # The builder-run argument binds the SLSA builder identity to THIS
+        # run (issue #137). These bytes were produced by the buildx step two
+        # steps above, inside this very job, so GITHUB_RUN_ID is the
+        # authoritative answer and the contract compares the predicate's
+        # builder ID against it exactly -- `/actions/runs/<other>` from any
+        # other run of any workflow in this repository now denies, where the
+        # old prefix match accepted every one of them.
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        if: steps.image_state.outputs.state == 'absent'
+        run: |
+          set -euo pipefail
+          # The platform set is derived from the index itself and then
+          # asserted to be EXACTLY the build step's platform list above, in
+          # jq `keys` sort order: a third or missing platform fails the
+          # release. Update BOTH together.
+          expected_platforms='linux/amd64 linux/arm64'
+          provenance_platforms="$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+            --format '{{ json .Provenance }}' | jq -r 'keys[]')"
+          mapfile -t platforms <<< "${provenance_platforms}"
+          test "${platforms[*]}" = "${expected_platforms}"
+          source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          statements=()
+          modified_predicates=()
+          expected_attestations=()
+          for platform in "${platforms[@]}"; do
+            predicate="${RUNNER_TEMP}/slsa-${platform//\//-}.json"
+            statement="${RUNNER_TEMP}/slsa-${platform//\//-}.statement.json"
+            modified_predicate="${RUNNER_TEMP}/slsa-${platform//\//-}.predicate.json"
+            docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+              --format "{{ json (index .Provenance \"${platform}\").SLSA }}" \
+              > "${predicate}"
+            python3 -I -B scripts/ci/release_contract.py attestation-statement \
+              --predicate "${predicate}" --output "${statement}" \
+              --predicate-output "${modified_predicate}" \
+              --image "${IMAGE}" --digest "${DIGEST}" --source "${source}" \
+              --revision "${SOURCE_SHA}" --platform "${platform}" \
+              --builder-run-id "${GITHUB_RUN_ID}"
+            statements+=("${statement}")
+            modified_predicates+=("${modified_predicate}")
+            expected_attestations+=(--expected "${platform}=${statement}")
+          done
+          test "$(sha256sum "${statements[@]}" | awk '{print $1}' | sort -u | wc -l)" \
+            -eq "${#statements[@]}"
+          for modified_predicate in "${modified_predicates[@]}"; do
+            cosign attest --yes --predicate "${modified_predicate}" \
+              --type "https://slsa.dev/provenance/v1" "${IMAGE}@${DIGEST}"
+          done
+          identity="${source}/.github/workflows/release-publisher.yml@refs/heads/main"
+          verified="${RUNNER_TEMP}/verified-new-attestations.json"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${DIGEST}" >/dev/null
+          cosign verify-attestation --type slsaprovenance1 --output json \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${DIGEST}" > "${verified}"
+          python3 -I -B scripts/ci/release_contract.py attestation-set \
+            --verified "${verified}" "${expected_attestations[@]}"
+      - name: Embed the resolved image digest into the chart values
+        # ADR 0016 step 1 (issue #111). The published chart must be deployable
+        # AS PUBLISHED. `chart/values.yaml` ships the all-zeros fail-closed
+        # sentinel in git -- a syntactically valid digest no registry can
+        # resolve -- so anything installing the published chart unmodified
+        # failed at pull time and the platform had to override `image.digest`
+        # by hand on every release.
+        #
+        # POSITION IS THE CONTRACT, on both sides:
+        #
+        #  * AFTER the HIGH/CRITICAL gate, `cosign sign`, and the provenance
+        #    attestation, so the only digest that can reach the chart is the
+        #    one all three stages already accepted. The value is read from
+        #    `steps.image.outputs.digest` and never re-derived from a tag
+        #    lookup, which could resolve to different bytes.
+        #
+        #  * BEFORE the chart classifier, so BOTH `helm package` invocations
+        #    -- the classifier's reproducibility re-package and the publish
+        #    step's -- read the identical substituted working tree. ONE
+        #    substitution ahead of both is why they cannot drift: a
+        #    substitution written into the publish step alone would make the
+        #    classifier package the sentinel, diff it against an already
+        #    published chart carrying the real digest, and misclassify an
+        #    idempotent re-run as `burned` instead of `complete`. Each
+        #    packaging step still re-reads what it actually produced (see the
+        #    `chart-digest-assert` calls below), so a substitution that
+        #    silently became a no-op cannot publish.
+        #
+        # The edit exists on the runner only and is never committed: the
+        # source tree keeps the sentinel, so pr-gate's four-way lock,
+        # `values.schema.json`, and the rendered-digest assertion stay exactly
+        # as strict as they are today.
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "${DIGEST}" != "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          python3 -I -B scripts/ci/release_contract.py chart-digest-embed \
+            --values chart/values.yaml --digest "${DIGEST}"
+          python3 -I -B scripts/ci/release_contract.py chart-digest-assert \
+            --values chart/values.yaml --digest "${DIGEST}"
+      - name: Classify an absent, complete, or burned chart version
+        id: chart_state
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repository="${CHART#ghcr.io/}"
+          token_file="${RUNNER_TEMP}/chart-registry-token.json"
+          credentials="${RUNNER_TEMP}/ghcr.netrc"
+          trap 'rm -f -- "${token_file}" "${credentials}"' EXIT
+          umask 077
+          printf 'machine ghcr.io\nlogin %s\npassword %s\n' \
+            "${GITHUB_ACTOR}" "${GHCR_PASSWORD}" > "${credentials}"
+          curl --fail-with-body --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
+            --get --data-urlencode "scope=repository:${repository}:pull" \
+            'https://ghcr.io/token' > "${token_file}"
+          token="$(jq -er '.token // .access_token' "${token_file}")"
+          rm -f -- "${token_file}" "${credentials}"
+          manifest="${RUNNER_TEMP}/existing-chart-manifest.json"
+          headers="${RUNNER_TEMP}/existing-chart-headers.txt"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${manifest}" \
+            --dump-header "${headers}" --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${token}" \
+            --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "https://ghcr.io/v2/${repository}/manifests/${VERSION}")"
+          registry_state="$(python3 -I -B scripts/ci/release_contract.py registry-state --http-status "${status}")"
+          if [ "${registry_state}" = absent ]; then
+            state="$(python3 -I -B scripts/ci/release_contract.py artifact-state \
+              --present false --source-match false --signature-match false \
+              --evidence-count 0 --expected-evidence 0)"
+            printf 'state=%s\ndigest=\n' "${state}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          chart_name="$(awk '/^name:/{print $2; exit}' chart/Chart.yaml)"
+          expected_archives="${RUNNER_TEMP}/expected-chart"
+          published_archives="${RUNNER_TEMP}/published-chart"
+          expected_tree="${RUNNER_TEMP}/expected-chart-tree"
+          published_tree="${RUNNER_TEMP}/published-chart-tree"
+          mkdir -p "${expected_archives}" "${published_archives}" "${expected_tree}" "${published_tree}"
+          helm package chart --version "${VERSION}" --app-version "${VERSION}" -d "${expected_archives}"
+          helm pull "oci://${CHART}" --version "${VERSION}" -d "${published_archives}"
+          tar -xzf "${expected_archives}/${chart_name}-${VERSION}.tgz" -C "${expected_tree}"
+          tar -xzf "${published_archives}/${chart_name}-${VERSION}.tgz" -C "${published_tree}"
+          # The expected tree is what a re-run would publish, so it must carry
+          # the same resolved digest the publish step embeds. Asserting it HERE
+          # rather than trusting the earlier step means a substitution that
+          # silently became a no-op fails this step loudly instead of producing
+          # a sentinel-bearing expected tree that diffs against the real
+          # published chart and reports a false `burned`.
+          python3 -I -B scripts/ci/release_contract.py chart-digest-assert \
+            --values "${expected_tree}/${chart_name}/values.yaml" --digest "${DIGEST}"
+          source_match=true
+          if ! diff -ru --no-dereference "${expected_tree}/${chart_name}" "${published_tree}/${chart_name}" >/dev/null; then
+            source_match=false
+          fi
+
+          digest="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "${headers}" | tail -n 1)"
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          computed="sha256:$(sha256sum "${manifest}" | awk '{print $1}')"
+          test "${computed}" = "${digest}"
+          signature_match=false
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release-publisher.yml@refs/heads/main"
+          if cosign verify \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              "${CHART}@${digest}" >/dev/null 2>&1; then
+            signature_match=true
+          fi
+          set +e
+          state="$(python3 -I -B scripts/ci/release_contract.py artifact-state \
+            --present true --source-match "${source_match}" \
+            --signature-match "${signature_match}" \
+            --evidence-count 0 --expected-evidence 0)"
+          classifier_status=$?
+          set -e
+          printf 'existing chart state: %s\n' "${state}"
+          test "${classifier_status}" -eq 0
+          printf 'state=%s\ndigest=%s\n' "${state}" "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Publish and sign an absent chart version
+        if: steps.chart_state.outputs.state == 'absent'
+        id: chart_publish
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.version }}"
+          chart_name="$(awk '/^name:/{print $2; exit}' chart/Chart.yaml)"
+          helm package chart --version "${version}" --app-version "${version}" -d "${RUNNER_TEMP}"
+          # Re-read the ARCHIVE, not the working tree: this is the byte stream
+          # that is about to be pushed and signed, and it is the last moment a
+          # chart still carrying the sentinel can be stopped. A green run that
+          # published an unpullable chart must be impossible.
+          packaged_tree="${RUNNER_TEMP}/packaged-chart-tree"
+          mkdir -p "${packaged_tree}"
+          tar -xzf "${RUNNER_TEMP}/${chart_name}-${version}.tgz" -C "${packaged_tree}"
+          python3 -I -B scripts/ci/release_contract.py chart-digest-assert \
+            --values "${packaged_tree}/${chart_name}/values.yaml" --digest "${DIGEST}"
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          push_log="${RUNNER_TEMP}/chart-push.log"
+          helm push "${RUNNER_TEMP}/${chart_name}-${version}.tgz" "oci://${CHART%/*}" 2>&1 | tee "${push_log}"
+          chart_digest="$(awk '/^Digest:/{print $2}' "${push_log}")"
+          [[ "${chart_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "${CHART}@${chart_digest}"
+          printf 'digest=%s\n' "${chart_digest}" >> "${GITHUB_OUTPUT}"
+      - name: Resolve the one chart digest for release notes
+        id: chart
+        env:
+          EXISTING_DIGEST: ${{ steps.chart_state.outputs.digest }}
+          PUBLISHED_DIGEST: ${{ steps.chart_publish.outputs.digest }}
+          CHART_STATE: ${{ steps.chart_state.outputs.state }}
+        run: |
+          set -euo pipefail
+          if [ "${CHART_STATE}" = complete ]; then
+            digest="${EXISTING_DIGEST}"
+          elif [ "${CHART_STATE}" = absent ]; then
+            digest="${PUBLISHED_DIGEST}"
+          else
+            printf 'unpublishable chart state %s\n' "${CHART_STATE}" >&2
+            exit 1
+          fi
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Re-bind both public aliases and exact platform SBOMs before sealing evidence
+        env:
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_ALIAS: ${{ steps.release.outputs.tag }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          CHART_ALIAS: ${{ steps.release.outputs.version }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image_repository="${IMAGE#ghcr.io/}"
+          chart_repository="${CHART#ghcr.io/}"
+          credentials="${RUNNER_TEMP}/rebind-ghcr.netrc"
+          image_token_file="${RUNNER_TEMP}/rebind-image-token.json"
+          chart_token_file="${RUNNER_TEMP}/rebind-chart-token.json"
+          trap 'rm -f -- "${credentials}" "${image_token_file}" "${chart_token_file}"' EXIT
+          umask 077
+          printf 'machine ghcr.io\nlogin %s\npassword %s\n' \
+            "${GITHUB_ACTOR}" "${GHCR_PASSWORD}" > "${credentials}"
+          mint_token() {
+            local repository="$1" token_file="$2"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
+              --get --data-urlencode "scope=repository:${repository}:pull" \
+              'https://ghcr.io/token' > "${token_file}"
+            jq -er '.token // .access_token' "${token_file}"
+          }
+          image_token="$(mint_token "${image_repository}" "${image_token_file}")"
+          chart_token="$(mint_token "${chart_repository}" "${chart_token_file}")"
+          rm -f -- "${credentials}" "${image_token_file}" "${chart_token_file}"
+
+          fetch_exact_alias() {
+            local repository="$1" reference="$2" accept="$3" prefix="$4"
+            local expected="$5" token="$6" manifest headers status state observed computed attempt
+            manifest="${RUNNER_TEMP}/${prefix}-alias-manifest.json"
+            headers="${RUNNER_TEMP}/${prefix}-alias-headers.txt"
+            for attempt in 1 2 3 4 5; do
+              status="$(curl --silent --show-error --location \
+                --proto '=https' --tlsv1.2 --output "${manifest}" \
+                --dump-header "${headers}" --write-out '%{http_code}' \
+                --header "Authorization: Bearer ${token}" --header "Accept: ${accept}" \
+                "https://ghcr.io/v2/${repository}/manifests/${reference}")"
+              state="$(python3 -I -B scripts/ci/release_contract.py registry-state \
+                --http-status "${status}")"
+              if [ "${state}" = absent ]; then
+                if [ "${attempt}" -eq 5 ]; then
+                  printf 'registry alias %s/%s remained absent\n' "${repository}" "${reference}" >&2
+                  return 1
+                fi
+                sleep "${attempt}"
+                continue
+              fi
+              observed="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "${headers}" | tail -n 1)"
+              [[ "${observed}" =~ ^sha256:[0-9a-f]{64}$ ]]
+              computed="sha256:$(sha256sum "${manifest}" | awk '{print $1}')"
+              test "${computed}" = "${observed}"
+              test "${observed}" = "${expected}"
+              return 0
+            done
+            return 1
+          }
+          fetch_exact_alias "${image_repository}" "${IMAGE_ALIAS}" \
+            'application/vnd.oci.image.index.v1+json' image "${IMAGE_DIGEST}" "${image_token}"
+          fetch_exact_alias "${chart_repository}" "${CHART_ALIAS}" \
+            'application/vnd.oci.image.manifest.v1+json' chart "${CHART_DIGEST}" "${chart_token}"
+
+          image_manifest="${RUNNER_TEMP}/image-alias-manifest.json"
+          sbom_plan="${RUNNER_TEMP}/rebind-image-sbom-plan.json"
+          python3 -I -B scripts/ci/release_contract.py sbom-index-record \
+            --index "${image_manifest}" --image-digest "${IMAGE_DIGEST}" \
+            --output "${sbom_plan}"
+          for platform in linux/amd64 linux/arm64; do
+            prefix="rebind-sbom-${platform//\//-}"
+            subject_digest="$(jq -er --arg platform "${platform}" \
+              '.[$platform].subject_digest' "${sbom_plan}")"
+            attestation_digest="$(jq -er --arg platform "${platform}" \
+              '.[$platform].attestation_digest' "${sbom_plan}")"
+            attestation="${RUNNER_TEMP}/${prefix}-manifest.json"
+            headers="${RUNNER_TEMP}/${prefix}-headers.txt"
+            status="$(curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${attestation}" \
+              --dump-header "${headers}" --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${image_token}" \
+              --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+              "https://ghcr.io/v2/${image_repository}/manifests/${attestation_digest}")"
+            test "$(python3 -I -B scripts/ci/release_contract.py registry-state \
+              --http-status "${status}")" = present
+            observed="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "${headers}" | tail -n 1)"
+            computed="sha256:$(sha256sum "${attestation}" | awk '{print $1}')"
+            test "${observed}" = "${attestation_digest}"
+            test "${computed}" = "${attestation_digest}"
+            layer_digest="$(python3 -I -B scripts/ci/release_contract.py sbom-layer-record \
+              --manifest "${attestation}" --attestation-digest "${attestation_digest}")"
+            statement="${RUNNER_TEMP}/${prefix}-statement.json"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${statement}" \
+              --header "Authorization: Bearer ${image_token}" \
+              "https://ghcr.io/v2/${image_repository}/blobs/${layer_digest}"
+            python3 -I -B scripts/ci/release_contract.py sbom-statement \
+              --statement "${statement}" --layer-digest "${layer_digest}" \
+              --image "${IMAGE}" --subject-digest "${subject_digest}" \
+              --platform "${platform}" >/dev/null
+          done
+      - name: Build the deterministic release evidence manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.version }}"
+          tag="${{ steps.release.outputs.tag }}"
+          name="hospedajedonlolo-com-${tag}-release-manifest.json"
+          path="${RUNNER_TEMP}/${name}"
+          python3 -I -B scripts/ci/release_contract.py release-manifest \
+            --output "${path}" --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}" --main-run-id "${MAIN_RUN_ID}" \
+            --version "${version}" --image "${IMAGE}" \
+            --image-digest "${{ steps.image.outputs.digest }}" \
+            --chart "${CHART}" --chart-digest "${{ steps.chart.outputs.digest }}"
+          python3 -I -B scripts/ci/release_contract.py manifest-record \
+            --manifest "${path}" --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}" --main-run-id "${MAIN_RUN_ID}" \
+            --version "${version}" --image "${IMAGE}" \
+            --image-digest "${{ steps.image.outputs.digest }}" \
+            --chart "${CHART}" --chart-digest "${{ steps.chart.outputs.digest }}"
+          digest="sha256:$(sha256sum "${path}" | awk '{print $1}')"
+          printf 'name=%s\npath=%s\ndigest=%s\n' \
+            "${name}" "${path}" "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Stage, verify, and publish the exact GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release.outputs.tag }}"
+          manifest="${{ steps.manifest.outputs.path }}"
+          asset_name="${{ steps.manifest.outputs.name }}"
+          python3 -I -B scripts/ci/release_contract.py release-notes \
+            --manifest "${manifest}" --output "${RUNNER_TEMP}/release-notes.md" \
+            --repository "${GITHUB_REPOSITORY}" --source-sha "${SOURCE_SHA}" \
+            --main-run-id "${MAIN_RUN_ID}" --version "${{ steps.release.outputs.version }}" \
+            --image "${IMAGE}" --image-digest "${{ steps.image.outputs.digest }}" \
+            --chart "${CHART}" --chart-digest "${{ steps.chart.outputs.digest }}"
+          existing="${RUNNER_TEMP}/existing-release.json"
+          releases_page="${RUNNER_TEMP}/existing-releases-page.json"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"
+          list_api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases?per_page=100"
+          classify_release() {
+            local status list_status matches
+            local -a record_args=()
+            status="$(curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${existing}" --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}")"
+            if [ "${status}" = 404 ]; then
+              # GitHub's by-tag endpoint documents that it returns a
+              # PUBLISHED release only: an unpublished draft under this
+              # exact tag (for example, our own draft-create below, retried
+              # after a lost response) 404s here even though it exists.
+              # Resolve the ambiguity from the authoritative list instead
+              # of trusting the by-tag 404 as proof nothing exists.
+              list_status="$(curl --silent --show-error --location \
+                --proto '=https' --tlsv1.2 --output "${releases_page}" --write-out '%{http_code}' \
+                --header 'Accept: application/vnd.github+json' \
+                --header 'X-GitHub-Api-Version: 2026-03-10' \
+                --header "Authorization: Bearer ${GH_TOKEN}" \
+                "${list_api}")"
+              # classify_release normally runs inside `$(...)`, where bash
+              # does not apply -e to a bare command's failure: an unguarded
+              # `test` here would silently fall through on a bad probe
+              # rather than stop, so the failure is an explicit exit.
+              if [ "${list_status}" != 200 ]; then
+                printf 'DENY: releases list probe returned HTTP %s\n' "${list_status}" >&2
+                exit 1
+              fi
+              matches="$(jq --arg tag "${tag}" \
+                '[.[] | select(.tag_name == $tag)] | length' "${releases_page}")"
+              if [ "${matches}" = 1 ]; then
+                jq -e --arg tag "${tag}" '.[] | select(.tag_name == $tag)' \
+                  "${releases_page}" > "${existing}"
+                status=200
+              elif [ "${matches}" != 0 ]; then
+                printf 'DENY: %s Releases share tag %s; a stranded draft needs operator resolution\n' \
+                  "${matches}" "${tag}" >&2
+                exit 1
+              fi
+            fi
+            if [ "${status}" = 200 ]; then
+              record_args=(--release-json "${existing}")
+            fi
+            python3 -I -B scripts/ci/release_contract.py release-state \
+              --http-status "${status}" \
+              "${record_args[@]}" --tag "${tag}" \
+              --title "hospedajedonlolo.com ${tag}" \
+              --body "${RUNNER_TEMP}/release-notes.md" --manifest "${manifest}"
+          }
+          verify_asset_bytes() {
+            local asset_api observed
+            asset_api="$(jq -er --arg name "${asset_name}" \
+              '.assets | select(length == 1) | .[0] | select(.name == $name) | .url' \
+              "${existing}")"
+            observed="${RUNNER_TEMP}/observed-release-manifest.json"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${observed}" \
+              --header 'Accept: application/octet-stream' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${asset_api}"
+            cmp --silent "${manifest}" "${observed}"
+          }
+
+          state="$(classify_release)"
+          if [ "${state}" = absent ]; then
+            if ! gh release create "${tag}" "${manifest}" --draft --verify-tag \
+              --title "hospedajedonlolo.com ${tag}" \
+              --notes-file "${RUNNER_TEMP}/release-notes.md"; then
+              printf 'draft Release create did not succeed; checking exact server state\n' >&2
+            fi
+            race_verified=false
+            for attempt in 1 2 3 4 5; do
+              state="$(classify_release)"
+              if [ "${state}" = prepared ] || [ "${state}" = staged ] || \
+                 [ "${state}" = exact ]; then
+                race_verified=true
+                break
+              fi
+              sleep "${attempt}"
+            done
+            test "${race_verified}" = true
+          fi
+
+          if [ "${state}" = prepared ]; then
+            # A response can be lost after draft metadata creation but before
+            # the asset upload. Resume only that exact zero-asset draft, never
+            # clobber an existing name, then reclassify the authoritative REST
+            # inventory before any publication attempt.
+            if ! gh release upload "${tag}" "${manifest}"; then
+              printf 'manifest upload did not succeed; checking exact server state\n' >&2
+            fi
+            upload_verified=false
+            for attempt in 1 2 3 4 5; do
+              state="$(classify_release)"
+              if [ "${state}" = staged ] || [ "${state}" = exact ]; then
+                upload_verified=true
+                break
+              fi
+              sleep "${attempt}"
+            done
+            test "${upload_verified}" = true
+          fi
+
+          if [ "${state}" = staged ]; then
+            # A draft is the only safe upload substrate: verify both the REST
+            # inventory digest and the bytes before immutable publication.
+            verify_asset_bytes
+            if ! gh release edit "${tag}" --draft=false; then
+              printf 'draft publication did not succeed; checking exact server state\n' >&2
+            fi
+            published=false
+            for attempt in 1 2 3 4 5; do
+              state="$(classify_release)"
+              if [ "${state}" = exact ]; then
+                published=true
+                break
+              fi
+              sleep "${attempt}"
+            done
+            test "${published}" = true
+          fi
+          test "${state}" = exact
+          classify_release >/dev/null
+          verify_asset_bytes
+
+      # This MUST remain the terminal publication check. Before an immutable
+      # Release exists, a repository writer could move the otherwise-exact tag
+      # after the early tag check but before Release creation. GitHub locks the
+      # tag only when publication becomes immutable, so re-read both live REST
+      # records after every existing/create/concurrent-winner Release path and
+      # bind the server-locked tag back to the source that produced the signed
+      # image, chart, and immutable notes.
+      - name: Re-bind the immutable Release to the exact annotated tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ref_json="${RUNNER_TEMP}/terminal-tag-ref.json"
+          tag_json="${RUNNER_TEMP}/terminal-tag-object.json"
+          release_json="${RUNNER_TEMP}/terminal-release.json"
+          observed_manifest="${RUNNER_TEMP}/terminal-release-manifest.json"
+          manifest="${{ steps.manifest.outputs.path }}"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          release_status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${release_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/releases/tags/${TAG}")"
+          test "${release_status}" = 200
+          python3 -I -B scripts/ci/release_contract.py release-record \
+            --release-json "${release_json}" --tag "${TAG}" \
+            --title "hospedajedonlolo.com ${TAG}" \
+            --body "${RUNNER_TEMP}/release-notes.md" --manifest "${manifest}"
+          asset_api="$(jq -er --arg name "${{ steps.manifest.outputs.name }}" \
+            '.assets | select(length == 1) | .[0] | select(.name == $name) | .url' \
+            "${release_json}")"
+          curl --fail-with-body --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${observed_manifest}" \
+            --header 'Accept: application/octet-stream' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${asset_api}"
+          cmp --silent "${manifest}" "${observed_manifest}"
+          ref_status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${ref_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/ref/tags/${TAG}")"
+          test "${ref_status}" = 200
+          tag_object="$(jq -er '.object.sha' "${ref_json}")"
+          object_status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${tag_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/tags/${tag_object}")"
+          test "${object_status}" = 200
+          python3 -I -B scripts/ci/release_contract.py tag-record \
+            --ref-json "${ref_json}" --tag-json "${tag_json}" \
+            --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+            --message "Release ${TAG} from ${SOURCE_SHA}" \
+            --tagger-name 'github-actions[bot]' \
+            --tagger-email '41898282+github-actions[bot]@users.noreply.github.com' \
+            --tagger-date "$(git show -s --format=%cI "${SOURCE_SHA}")"

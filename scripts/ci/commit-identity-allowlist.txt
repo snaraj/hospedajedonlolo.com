@@ -1,0 +1,34 @@
+# Lift mechanism for scripts/ci/commit_identity_contract.py
+#
+# That gate walks the commit range a push or pull request actually contributes
+# and refuses two constructs: an author or committer email that is not the
+# sanctioned noreply identity (`identity`), and a `Co-authored-by:` trailer in
+# the message body (`co-author`). Both lift here, one line, with a written
+# reason.
+#
+# Format, one entry per line:
+#
+#     <40-lowercase-hex sha> | <rule> | <reason>
+#
+# `<rule>` is one of: identity, co-author.
+#
+# Entries are keyed by SHA and RULE, never by address. That is deliberate and it
+# is the same rule the failure messages follow: this gate exists to keep a
+# personal address out of the permanently public record, so it must not write
+# one into a tracked file in the course of exempting it. Requirement 12 sanctions
+# exactly one address in this repository; recording any other here -- even to
+# document a violation -- would be the very disclosure the gate prevents. The SHA
+# is sufficient to identify the commit, and `git log -1 <sha>` shows an
+# investigator the rest locally.
+#
+# Abbreviated SHAs are refused: an abbreviation can become ambiguous as history
+# grows, and an exemption that starts matching a second commit is an exemption
+# nobody wrote.
+#
+# THIS REPOSITORY HAS NO ENTRY. Its history began under this gate: the seed
+# commit and every later commit carry the sanctioned identity, so nothing in
+# history needs an exemption, and an entry here would be an exemption nobody
+# needed. The rule itself admits GitHub's own `noreply@github.com` committer
+# from an owner-performed squash or rebase merge, because it names no person
+# and refusing it would make every main push red forever; that admission is
+# the rule's, never this file's.

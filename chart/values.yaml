@@ -1,4 +1,38 @@
+# Two replicas so a rollout always leaves one Pod serving (maxSurge 0,
+# maxUnavailable 1). The namespace quota admits exactly two.
+replicaCount: 2
+# The platform's activation gate; the composition sets it true once reviewed.
+deploymentReady: false
 image:
   repository: ghcr.io/snaraj/hospedajedonlolo-com
-  tag: v0.1.0
+  tag: v0.1.1
+  # Replaced in the publisher's runner copy just before `helm package`; the
+  # all-zero sentinel never leaves this repository in a published chart.
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  pullPolicy: IfNotPresent
+service:
+  port: 8080
+# The deployment-provider binding point: the only peer allowed to reach the
+# origin. Provider names appear here and nowhere else in the chart.
+ingress:
+  peerNamespace: cloudflare-public
+  peerAppName: cloudflare-public
+  peerInstance: hospedajedonlolo-com-tunnel
+# The operator-provisioned read-only claim holding immutable/<sha256>/<name>.
+# The chart never creates it.
+media:
+  claimName: hospedajedonlolo-com-media
+  mountPath: /hospedajedonlolo-com-media
+  # Simultaneous media transfers per Pod; most traffic is served from the
+  # edge cache, so this bounds origin work, not visitor capacity.
+  maxConcurrent: 32
+resources:
+  requests:
+    cpu: 25m
+    # Verified media is held in memory: the photographs now, and the film too
+    # once it is delivered (about 26 MiB in all). The request covers that plus
+    # the runtime rather than understating use.
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

@@ -1,0 +1,51 @@
+{
+  "schema": "compliance/v1",
+  "liveUrl": "https://hospedajedonlolo.com/",
+  "dataCollected": [
+    {
+      "what": "One record per request: a request id, the method, the URL path, the response status, size and duration, the HTTP protocol version, and the W3C trace and parent-span ids when the request carries a well-formed traceparent",
+      "where": "Pod log",
+      "purpose": "Operating the site; no client address, query string, user agent or cookie is recorded",
+      "evidence": "internal/server/logging.go"
+    }
+  ],
+  "storage": [],
+  "thirdParties": [
+    {
+      "origin": "https://maps.google.com",
+      "purpose": "The area map: the page embeds a Google Maps frame, and the map buttons point it at nearby places",
+      "consent": "pending",
+      "decision": "https://github.com/snaraj/hospedajedonlolo.com/issues/2",
+      "reason": "A Google embed loads in the visitor's browser once the lazily loaded map nears the screen, and it can set Google's own cookies; whether that needs the visitor's consent is an open owner decision"
+    },
+    {
+      "origin": "https://www.google.com",
+      "purpose": "The same area map: maps.google.com redirects the frame to www.google.com, which serves it",
+      "consent": "pending",
+      "decision": "https://github.com/snaraj/hospedajedonlolo.com/issues/2",
+      "reason": "The frame's real origin after the redirect, with the same open consent question as maps.google.com"
+    }
+  ],
+  "legalPages": [
+    {
+      "id": "privacy",
+      "status": "pending",
+      "decision": "https://github.com/snaraj/hospedajedonlolo.com/issues/2"
+    }
+  ],
+  "edgeObservations": [],
+  "handOffs": [
+    {
+      "target": "https://wa.me",
+      "carries": "The booking message the visitor composed (dates, guests and room) or a question about one room, in the visitor's language",
+      "purpose": "Booking and room questions go to the business over WhatsApp",
+      "reason": "Nothing is sent to this site; the message reaches WhatsApp only when the visitor presses a booking link or submits the form, and WhatsApp's own terms apply from there"
+    },
+    {
+      "target": "mailto:",
+      "carries": "The same booking message, with a subject line, addressed to the business's public email",
+      "purpose": "The booking form's email button opens the visitor's own mail client",
+      "reason": "Nothing is sent to this site; the visitor's mail client opens with the message and sends nothing until the visitor does"
+    }
+  ]
+}

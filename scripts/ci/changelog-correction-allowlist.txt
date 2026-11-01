@@ -1,0 +1,25 @@
+# Released changelog date corrections — the ONE lift on the append-only guard.
+#
+# `scripts/ci/release_contract.py` proves that `CHANGELOG.md` is append-only
+# from the protected base to the head of every range it validates: no released
+# version may be removed, reordered, duplicated, or have one byte of its
+# entries rewritten. None of that is liftable, and no line in this file can
+# make it so.
+#
+# The single edit a line here authorizes is one released heading's DATE moving
+# from one stated value to another stated value, because a heading can be
+# wrong about the day a release actually shipped and the record that settles
+# it lives outside this file. Naming the exact old date, the exact new date,
+# and the record the new date comes from puts that correction where a reviewer
+# reads it instead of inside a diff nobody diffed.
+#
+# An entry is spent as soon as it lands: it names the old date, so once the
+# protected base carries the corrected heading there is nothing left for it to
+# authorize. A spent entry is therefore inert rather than a red build — it is
+# addressed to bytes that no longer exist anywhere in the ladder — and it is
+# removed as ordinary housekeeping, never under pressure.
+#
+# Format, exactly four `|`-separated non-empty fields:
+#
+#     <version> | <old date> | <new date> | <reason>
+#

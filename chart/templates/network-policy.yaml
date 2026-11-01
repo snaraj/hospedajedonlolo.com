@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingress-to-hospedajedonlolo-com
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hospedajedonlolo-com.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "hospedajedonlolo-com.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- /* Only this site's own tunnel connector may reach the origin, and only
+    on its unprivileged HTTP port. It takes all three facts to name one peer:
+    the connectors share a namespace and an app label and differ only by
+    instance, so a selector without the instance would admit every site's
+    connector. The schema requires all three. */}}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.ingress.peerNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.ingress.peerAppName }}
+              app.kubernetes.io/instance: {{ .Values.ingress.peerInstance }}
+      ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+  # The origin has no runtime dependency at all, so every outbound connection
+  # is denied. The `- Egress` entry in policyTypes is what denies: the API
+  # server drops this empty list from the stored object, so removing that
+  # entry while leaving this list would silently restore full outbound access.
+  egress: []
