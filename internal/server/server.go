@@ -35,8 +35,6 @@ type Config struct {
 	MediaRoot string
 	// MediaMaxConcurrent bounds simultaneous media transfers per Pod.
 	MediaMaxConcurrent int
-	// Withheld names pinned media that is verified but not delivered.
-	Withheld []string
 	// Logger receives one record per request; nil discards them.
 	Logger *slog.Logger
 }
@@ -67,7 +65,7 @@ func New(cfg Config) (*Site, error) {
 	if err != nil {
 		return nil, err
 	}
-	media, err := openMediaStore(cfg.MediaRoot, cfg.MediaMaxConcurrent, cfg.Media, cfg.Withheld)
+	media, err := openMediaStore(cfg.MediaRoot, cfg.MediaMaxConcurrent, cfg.Media)
 	if err != nil {
 		return nil, err
 	}

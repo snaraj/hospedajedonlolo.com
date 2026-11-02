@@ -33,7 +33,20 @@
       "decision": "https://github.com/snaraj/hospedajedonlolo.com/issues/2"
     }
   ],
-  "edgeObservations": [],
+  "edgeObservations": [
+    {
+      "kind": "injected-inline-script",
+      "marker": "/cdn-cgi/challenge-platform/",
+      "reason": "The edge appends a bot-detection loader to every HTML response; this origin's CSP blocks it, so it never runs. Keeping or disabling it is an owner decision.",
+      "issue": "https://github.com/snaraj/platform/issues/407"
+    },
+    {
+      "kind": "reporting-endpoint",
+      "origin": "https://a.nel.cloudflare.com",
+      "reason": "The edge adds NEL and Report-To headers, so browsers send network-error reports to the edge provider. Naming it in a privacy notice or disabling it is an owner decision.",
+      "issue": "https://github.com/snaraj/platform/issues/407"
+    }
+  ],
   "handOffs": [
     {
       "target": "https://wa.me",

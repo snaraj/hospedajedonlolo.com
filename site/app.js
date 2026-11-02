@@ -3,6 +3,8 @@ const translated=[...document.querySelectorAll('[data-en]')];
 translated.forEach(el=>el.dataset.es=el.innerHTML);
 const toggle=document.getElementById('language');
 toggle.addEventListener('click',()=>{language=language==='es'?'en':'es';document.documentElement.lang=language;translated.forEach(el=>el.innerHTML=el.dataset[language]);toggle.textContent=language==='es'?'EN':'ES';toggle.setAttribute('aria-label',language==='es'?'Switch to English':'Cambiar a español');});
+// Open in the visitor's browser language: the first Spanish or English preference wins, and any other browser gets English. The toggle still switches freely.
+if([...(navigator.languages||[]),navigator.language].map(tag=>String(tag||'').slice(0,2).toLowerCase()).find(tag=>tag==='es'||tag==='en')!=='es')toggle.click();
 const dialog=document.getElementById('lightbox');
 document.querySelectorAll('[data-photo]').forEach(button=>button.addEventListener('click',()=>{dialog.querySelector('img').src='assets/'+button.dataset.photo+'.webp';dialog.querySelector('img').alt=button.querySelector('img').alt;dialog.showModal();}));
 document.getElementById('close').onclick=()=>dialog.close();dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close();});

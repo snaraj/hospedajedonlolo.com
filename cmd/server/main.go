@@ -37,24 +37,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger := newLogger(os.Stdout, isTerminal(os.Stdout), os.Getenv)
-	pages, media, withheld := productionInputs()
-	if err := run(ctx, logger, os.Getenv, nil, pages, media, withheld); err != nil {
+	pages, media := productionInputs()
+	if err := run(ctx, logger, os.Getenv, nil, pages, media); err != nil {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("server exited")
 }
 
-// productionInputs is the published site: the embedded page, the pinned media
-// and the media that is verified but withheld from delivery.
-func productionInputs() (fs.FS, []site.Object, []string) {
-	return site.Pages, site.Media, site.Withheld
+// productionInputs is the published site: the embedded page and the pinned
+// media, the film included.
+func productionInputs() (fs.FS, []site.Object) {
+	return site.Pages, site.Media
 }
 
 // buildSite validates the environment and builds the verified site exactly as
-// run serves it, withheld media included. It opens no socket, so the whole
-// configuration path is testable on its own.
-func buildSite(logger *slog.Logger, getenv func(string) string, pages fs.FS, media []site.Object, withheld []string) (*server.Site, int, int, error) {
+// run serves it. It opens no socket, so the whole configuration path is
+// testable on its own.
+func buildSite(logger *slog.Logger, getenv func(string) string, pages fs.FS, media []site.Object) (*server.Site, int, int, error) {
 	port, err := listenPort(getenv("PORT"))
 	if err != nil {
 		return nil, 0, 0, err
@@ -68,7 +68,6 @@ func buildSite(logger *slog.Logger, getenv func(string) string, pages fs.FS, med
 		Media:              media,
 		MediaRoot:          getenv("MEDIA_ROOT"),
 		MediaMaxConcurrent: maxConcurrent,
-		Withheld:           withheld,
 		Logger:             logger,
 	})
 	if err != nil {
@@ -78,11 +77,10 @@ func buildSite(logger *slog.Logger, getenv func(string) string, pages fs.FS, med
 }
 
 // run builds the site from the environment and serves until ctx ends. A nil
-// listener means "listen on PORT"; tests pass their own listener, pages, media
-// and withheld names so the whole start-serve-drain path runs against a
-// fixture volume.
-func run(ctx context.Context, logger *slog.Logger, getenv func(string) string, listener net.Listener, pages fs.FS, media []site.Object, withheld []string) error {
-	origin, port, maxConcurrent, err := buildSite(logger, getenv, pages, media, withheld)
+// listener means "listen on PORT"; tests pass their own listener, pages and
+// media so the whole start-serve-drain path runs against a fixture volume.
+func run(ctx context.Context, logger *slog.Logger, getenv func(string) string, listener net.Listener, pages fs.FS, media []site.Object) error {
+	origin, port, maxConcurrent, err := buildSite(logger, getenv, pages, media)
 	if err != nil {
 		return err
 	}
