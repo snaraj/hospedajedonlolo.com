@@ -226,6 +226,57 @@ class JudgeTests(unittest.TestCase):
         attr = "default-src 'self'; script-src-attr 'nonce-bm9uY2U='; frame-ancestors 'none'"
         self.assertEqual(gate.judge(manifest(), document(Content_Security_Policy=attr), {}).refusals, [])
 
+    def test_a_declared_injected_script_origin_passes_only_while_the_csp_blocks_it(self) -> None:
+        # The edge's analytics beacon, as the edge injects it: an external
+        # module script with SRI. Declared, it passes only while an enforced
+        # policy refuses scripts from its origin, because that block is the
+        # declaration's whole reason.
+        beacon = "https://beacon.example"
+        tag = f'<script type="module" src="{beacon}/beacon.min.js" integrity="sha512-abc=" crossorigin="anonymous"></script>'
+        html = HTML.replace("</body>", tag + "</body>")
+        declared = manifest()
+        declared["edgeObservations"].append(
+            {"kind": "injected-script-origin", "origin": beacon, "reason": "edge", "issue": "https://github.com/owner/infra/issues/3"}
+        )
+        verdict = gate.judge(declared, document(html=html), {})
+        self.assertEqual(verdict.refusals, [])
+        self.assertIn(f"declared injected script origin seen: {beacon}", verdict.notes)
+        self.assertRefused(gate.judge(manifest(), document(html=html), {}), f"loads script from the undeclared origin {beacon}")
+        message = f"declared injected origin {beacon}, which this CSP can let run"
+        for csp in (
+            f"default-src 'self'; script-src 'self' {beacon}; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' beacon.example/beacon.min.js; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' http://beacon.example; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' https:; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' *.example; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' 'strict-dynamic'; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' 'nonce-bm9uY2U='; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' 'sha512-abc='; frame-ancestors 'none'",
+            f"default-src 'self' {beacon}; frame-ancestors 'none'",
+            # No directive governs scripts at all, so nothing blocks them.
+            "frame-ancestors 'none'; object-src 'none'",
+            # An engine without script-src-elem reads script-src.
+            f"default-src 'self'; script-src-elem 'self'; script-src 'self' {beacon}; frame-ancestors 'none'",
+        ):
+            with self.subTest(csp=csp):
+                self.assertRefused(gate.judge(declared, document(html=html, Content_Security_Policy=csp), {}), message)
+        # One enforced policy that blocks it is enough, as for inline scripts.
+        admitting = f"default-src 'self'; script-src 'self' {beacon}; frame-ancestors 'none'"
+        both = gate.Fetched(SITE, 200, [("Content-Security-Policy", admitting), *headers()], html.encode())
+        self.assertFalse(any(message in refusal for refusal in gate.judge(declared, both, {}).refusals))
+        # Another origin's host never admits it, and a stylesheet from the
+        # declared origin is not the declared script.
+        other = "default-src 'self'; script-src 'self' https://elsewhere.example; frame-ancestors 'none'"
+        self.assertFalse(any(message in r for r in gate.judge(declared, document(html=html, Content_Security_Policy=other), {}).refusals))
+        sheet = HTML.replace("</body>", f'<link rel="stylesheet" href="{beacon}/x.css"></body>')
+        self.assertRefused(gate.judge(declared, document(html=sheet), {}), f"loads link stylesheet from the undeclared origin {beacon}")
+        # A declaration whose script no longer occurs is stale.
+        self.assertRefused(gate.judge(declared, document(), {}), f"injected script origin {beacon}, which no longer occurs")
+        # Check mode requires the origin.
+        broken = manifest()
+        broken["edgeObservations"].append({"kind": "injected-script-origin", "reason": "edge", "issue": "https://github.com/owner/infra/issues/3"})
+        self.assertTrue(any("injected script loads from" in refusal for refusal in gate.validate(broken)))
+
     def test_framing_must_be_denied_somewhere(self) -> None:
         csp = "default-src 'self'"
         self.assertRefused(gate.judge(manifest(), document(Content_Security_Policy=csp, X_Frame_Options=None), {}), "framing")
@@ -994,6 +1045,13 @@ class ShippedManifestTests(unittest.TestCase):
 # exactly the cap, then an undeclared inline script only a complete read sees.
 PAST_CAP = SITE_HTML.encode().ljust(gate.BODY_CAP_BYTES) + b"<script>window.reviewProbe=1</script>"
 
+# The edge's beacon, injected into an otherwise empty page of this site.
+BEACON = "https://beacon.example"
+
+
+def beacon_page(origin: str) -> bytes:
+    return f'<!doctype html><html><body><script defer src="{origin}/beacon.js"></script>{INJECTED}</body></html>'.encode()
+
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - the stdlib names it
@@ -1001,11 +1059,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         body = {
             "/at-cap": SITE_HTML.encode().ljust(gate.BODY_CAP_BYTES),
             "/past-cap": PAST_CAP,
+            "/beacon": beacon_page(BEACON),
+            "/nbsp": beacon_page(BEACON),
+            "/own-port": beacon_page("https://site.example:443"),
         }.get(self.path, SITE_HTML.encode())
         # "/cut-short" promises more bytes than it sends, then closes.
         promised = len(body) + (100 if self.path == "/cut-short" else 0)
+        # "/nbsp" ends both script-governing directives with a U+00A0 byte.
+        csp = SITE_CSP
+        if self.path == "/nbsp":
+            csp = SITE_CSP.replace("'none'; script-src 'self';", "'none'\xa0; script-src 'self'\xa0;", 1)
         self.send_response(status)
-        for key, value in headers(Content_Security_Policy=SITE_CSP):
+        for key, value in headers(Content_Security_Policy=csp):
             self.send_header(key, value)
         self.send_header("Content-Length", str(promised))
         self.end_headers()
@@ -1078,17 +1143,20 @@ class LiveModeTests(unittest.TestCase):
                     self.assertEqual(gate.run_live(gate.MANIFEST, fetcher=unreachable), 1)
                 self.assertIn("could not be read", output.getvalue())
 
-    def live(self, path: str) -> tuple[int, str]:
-        """`live` against the compliant manifest, with the site served at `path`."""
+    def live(self, path: str, value: dict | None = None, landed: str | None = None) -> tuple[int, str]:
+        """`live` against the compliant manifest, or `value`, with the site served at `path`.
+
+        `landed` stands in for the URL a redirect left the document at.
+        """
         base = self.base
 
         def fetcher(url: str) -> gate.Fetched:
             answer = gate.fetch(base + path)
-            return gate.Fetched(url, answer.status, answer.headers, answer.body)
+            return gate.Fetched(landed or url, answer.status, answer.headers, answer.body)
 
         with tempfile.TemporaryDirectory() as scratch:
             manifest_path = Path(scratch) / "compliance.json"
-            manifest_path.write_text(json.dumps(site_manifest()))
+            manifest_path.write_text(json.dumps(site_manifest() if value is None else value))
             output = io.StringIO()
             with redirect_stdout(output):
                 code = gate.run_live(manifest_path, fetcher=fetcher)
@@ -1107,6 +1175,39 @@ class LiveModeTests(unittest.TestCase):
         # The cap itself is still a complete answer.
         self.assertEqual(len(gate.fetch(self.base + "/at-cap").body), gate.BODY_CAP_BYTES)
         self.assertEqual(self.live("/at-cap")[0], 0)
+
+    def test_an_injected_script_origin_is_judged_against_the_fetched_document(self) -> None:
+        # The review of #8, end to end through validation, the stdlib fetch and
+        # `live`, from the shipped manifest with one injected origin declared.
+        def declaring(origin: str) -> dict:
+            value = site_manifest()
+            value["edgeObservations"].append(
+                {"kind": "injected-script-origin", "origin": origin, "reason": "edge", "issue": "https://github.com/owner/infra/issues/3"}
+            )
+            return value
+
+        let_run = "which this CSP can let run"
+        # Control: the site's own ASCII policy blocks an ordinary cross-origin beacon.
+        code, output = self.live("/beacon", declaring(BEACON))
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"declared injected script origin seen: {BEACON}", output)
+        # 'self' is the document's origin after a redirect, and the same host
+        # spelled with its default port is the same origin: neither is blocked.
+        for path, origin, landed in (("/beacon", BEACON, BEACON + "/landing"), ("/own-port", "https://site.example:443", None)):
+            with self.subTest(origin=origin, landed=landed):
+                code, output = self.live(path, declaring(origin), landed)
+                self.assertEqual(code, 1, output)
+                self.assertIn(f"declared injected origin {origin}, {let_run}", output)
+        # Browsers ignore a directive carrying a non-ASCII code point, which the
+        # stdlib header parser keeps, so neither ignored directive blocks it.
+        self.assertIn("'none'\xa0", gate.fetch(self.base + "/nbsp").first("content-security-policy"))
+        code, output = self.live("/nbsp", declaring(BEACON))
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"declared injected origin {BEACON}, {let_run}", output)
+        self.assertIn("the CSP has no default-src", output)
+        self.assertEqual(gate.parse_csp("default-src 'self';\tscript-src 'self' b\xe9.example; img-src 'self'"),
+                         {"default-src": ["'self'"], "img-src": ["'self'"]})
+        self.assertFalse(gate.script_origin_blocked([f"default-src {BEACON}; script-src 'self' b\xe9.example"], BEACON, SITE))
 
     def test_an_answer_shorter_than_its_content_length_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "declared [0-9]+ bytes and delivered [0-9]+"):

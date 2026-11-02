@@ -29,7 +29,9 @@ subcommands:
          manifest does not declare (and none at all through a wildcard or a
          bare scheme), script directives must not admit 'unsafe-inline' or
          eval'd code, a declared injected script passes only while a policy
-         blocks every inline script, framing must be denied, HSTS must last a
+         blocks every inline script, a declared injected script origin passes
+         only while a policy blocks scripts from that origin, framing must be
+         denied, HSTS must last a
          year, nosniff and a Referrer-Policy must be present, the document must
          set no cookie, every reporting endpoint and every script, stylesheet
          or embedded resource in the served HTML must be this origin's or
@@ -122,7 +124,7 @@ WRITTEN_WHEN = {"visitor-action"}
 # the issue URL that holds it; see THIRD PARTIES AND CONSENT above.
 CONSENT = {"not-required", "pending"}
 PAGE_STATUS = {"published", "pending"}
-OBSERVATION_KINDS = {"injected-inline-script", "reporting-endpoint"}
+OBSERVATION_KINDS = {"injected-inline-script", "injected-script-origin", "reporting-endpoint"}
 ISSUE_URL = re.compile(r"\Ahttps://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+\Z")
 ORIGIN = re.compile(r"\Ahttps://[a-z0-9.-]+(?::[0-9]{1,5})?\Z")
 # The only non-origin hand-off targets: each opens the visitor's own app.
@@ -411,6 +413,8 @@ def validate(manifest: object, source_root: Path = SOURCE_ROOT, repo_root: Path 
             refusals.append(f"{where} needs the marker text that identifies the injected script")
         if kind == "reporting-endpoint" and not (isinstance(entry.get("origin"), str) and ORIGIN.match(entry["origin"])):
             refusals.append(f"{where} needs the bare https origin the reports go to")
+        if kind == "injected-script-origin" and not (isinstance(entry.get("origin"), str) and ORIGIN.match(entry["origin"])):
+            refusals.append(f"{where} needs the bare https origin the injected script loads from")
         if not (isinstance(entry.get("issue"), str) and ISSUE_URL.match(entry["issue"])):
             refusals.append(f"{where}.issue must be the issue URL that holds the decision")
     return refusals
@@ -778,15 +782,22 @@ def code_only(text: str, svelte: bool = False, ambiguous_regex: bool = False) ->
 # ----------------------------------------------------------------- live mode
 
 
+# The only separator CSP knows: ASCII whitespace, never Unicode's.
+_ASCII_WHITESPACE = "\t\n\x0c\r "
+
+
 def parse_csp(value: str) -> dict[str, list[str]]:
+    """The directives of one serialized policy, parsed as CSP3 section 2.2.1 does."""
     policy: dict[str, list[str]] = {}
     for part in value.split(";"):
-        tokens = part.strip().split()
-        if not tokens:
+        token = part.strip(_ASCII_WHITESPACE)
+        # Browsers ignore a directive carrying a non-ASCII code point, so its
+        # sources never block anything.
+        if not token or not token.isascii():
             continue
-        name = tokens[0].lower()
-        # The first occurrence of a directive wins (CSP3 section 2.2.1).
-        policy.setdefault(name, tokens[1:])
+        name, *sources = re.split(f"[{_ASCII_WHITESPACE}]+", token)
+        # The first occurrence of a directive wins.
+        policy.setdefault(name.lower(), sources)
     return policy
 
 
@@ -856,6 +867,56 @@ def inline_scripts_blocked(policies: list[str]) -> bool:
     return False
 
 
+# Sources known never to admit an external script. Every other source -- that
+# origin's host, a scheme, a wildcard, a nonce or hash (an injected tag can
+# carry either), 'strict-dynamic' or a keyword this gate does not know -- is
+# read as admitting it, and 'self' is read against the document's own host.
+_INERT_FOR_EXTERNAL = {
+    "'none'", "'unsafe-inline'", "'unsafe-eval'", "'wasm-unsafe-eval'", "'report-sample'", "'unsafe-hashes'",
+}
+
+
+def script_origin_blocked(policies: list[str], origin: str, document_url: str) -> bool:
+    """Whether one enforced policy refuses <script src> from `origin`.
+
+    The counterpart of `inline_scripts_blocked` for a script the edge injects
+    from another origin. A policy blocks it when the list governing <script>
+    elements -- `script-src-elem`, else `script-src`, else `default-src` --
+    exists and no source in it can admit that origin's host, whatever the
+    scheme. 'self' is the fetched document's origin after any redirect, so it
+    admits `origin` whenever the two share a host, whatever the scheme or
+    port. The `script-src` list is read too, for engines without
+    `script-src-elem`, and one blocking policy is enough.
+    """
+    host = urlsplit(origin).hostname
+    own = urlsplit(document_url).hostname
+
+    def admits(sources: list[str]) -> bool:
+        for source in sources:
+            lowered = source.lower()
+            if lowered == "'self'":
+                if host == own:
+                    return True
+                continue
+            if lowered in _INERT_FOR_EXTERNAL:
+                continue
+            if lowered.startswith("'") or "*" in lowered or lowered.endswith(":"):
+                return True
+            if urlsplit(lowered if "://" in lowered else "https://" + lowered).hostname == host:
+                return True
+        return False
+
+    for raw in policies:
+        policy = parse_csp(raw)
+        governing = [
+            next((policy[name] for name in chain if name in policy), None)
+            for chain in (("script-src-elem", "script-src", "default-src"), ("script-src", "default-src"))
+        ]
+        if all(sources is not None and not admits(sources) for sources in governing):
+            return True
+    return False
+
+
 def reporting_origins(document: Fetched) -> set[str]:
     origins: set[str] = set()
     for value in document.all("report-to"):
@@ -886,6 +947,9 @@ def judge(manifest: dict, document: Fetched, pages: dict[str, Fetched]) -> Verdi
     markers = {entry["marker"]: False for entry in observations if entry.get("kind") == "injected-inline-script"}
     reporters = {
         entry["origin"].lower(): False for entry in observations if entry.get("kind") == "reporting-endpoint"
+    }
+    injected_origins = {
+        entry["origin"].lower(): False for entry in observations if entry.get("kind") == "injected-script-origin"
     }
 
     if document.status != 200:
@@ -982,6 +1046,18 @@ def judge(manifest: dict, document: Fetched, pages: dict[str, Fetched]) -> Verdi
         if target.scheme not in {"http", "https"}:
             continue
         origin = origin_of(urljoin(document.url, url))
+        if origin != site and origin not in declared and kind == "script" and origin in injected_origins:
+            injected_origins[origin] = True
+            if script_origin_blocked(policies, origin, document.url):
+                verdict.notes.append(f"declared injected script origin seen: {origin}")
+            else:
+                # As for an injected inline script, the declaration rests on
+                # the block, so no manifest line lifts this.
+                verdict.refuse(
+                    f"the served HTML loads script from the declared injected origin {origin}, which this CSP can "
+                    "let run: no enforced policy blocks scripts from it, and the declaration rests on that block"
+                )
+            continue
         if origin != site and origin not in declared:
             verdict.refuse(
                 f"the served HTML loads {kind} from the undeclared origin {origin}",
@@ -1020,6 +1096,12 @@ def judge(manifest: dict, document: Fetched, pages: dict[str, Fetched]) -> Verdi
         if not seen:
             verdict.refuse(
                 f"edgeObservations declares the reporting endpoint {origin}, which no longer occurs: the entry is stale",
+                "delete that edgeObservations entry",
+            )
+    for origin, seen in sorted(injected_origins.items()):
+        if not seen:
+            verdict.refuse(
+                f"edgeObservations declares the injected script origin {origin}, which no longer occurs: the entry is stale",
                 "delete that edgeObservations entry",
             )
 

@@ -2,6 +2,6 @@ apiVersion: v2
 name: hospedajedonlolo-com
 description: Go service embedding the Hospedaje Don Lolo page, serving its pinned media from a read-only volume
 type: application
-version: 0.1.2
-appVersion: "0.1.2"
+version: 0.1.3
+appVersion: "0.1.3"
 kubeVersion: ">=1.36.0-0"
