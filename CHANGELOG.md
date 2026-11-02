@@ -15,7 +15,11 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   `injected-script-origin`: an external script the edge injects from another
   origin. Like an injected inline script, a declaration passes only while an
   enforced policy blocks scripts from that origin, and it is stale once the
-  script is gone.
+  script is gone. There, `'self'` means the fetched document's own host after
+  any redirect, whatever the scheme or port.
+- The gate parses a Content-Security-Policy as browsers do: only ASCII
+  whitespace separates sources, and a directive carrying a non-ASCII code
+  point is ignored, so it never counts as blocking anything.
 - `compliance.json` declares the edge's free Web Analytics beacon this way.
   The owner decided on 2026-11-02 to keep it as it is; this origin's CSP
   blocks it, so it never runs and collects nothing. The live check now passes.
