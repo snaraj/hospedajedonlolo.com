@@ -52,7 +52,66 @@ func TestScriptKeepsTheDeliveredLines(t *testing.T) {
 	}
 }
 
-var iframeTag = regexp.MustCompile(`<iframe\b[^>]*>`)
+const htmlSpace = " \t\n\f\r"
+
+// startTags returns the attributes of every start tag called name, read the
+// way an HTML tokenizer reads them: names in any case, attributes separated
+// by whitespace or '/' (or by nothing after a quoted value), optional
+// whitespace around '=', quoted or unquoted values, and the first of a
+// repeated attribute winning. A '>' inside a quoted value does not end the tag.
+func startTags(page, name string) []map[string]string {
+	var tags []map[string]string
+	lower := strings.ToLower(page)
+	for i := 0; ; {
+		at := strings.Index(lower[i:], "<"+name)
+		if at < 0 {
+			return tags
+		}
+		j := i + at + 1 + len(name)
+		if j < len(page) && !strings.ContainsRune(htmlSpace+"/>", rune(page[j])) {
+			i = j // a longer tag name, such as <iframes
+			continue
+		}
+		attrs := map[string]string{}
+		for j < len(page) && page[j] != '>' {
+			if strings.ContainsRune(htmlSpace+"/", rune(page[j])) {
+				j++
+				continue
+			}
+			k := j + 1 // an attribute name is at least one character, even '='
+			for k < len(page) && !strings.ContainsRune(htmlSpace+"/>=", rune(page[k])) {
+				k++
+			}
+			key, value := strings.ToLower(page[j:k]), ""
+			for k < len(page) && strings.ContainsRune(htmlSpace, rune(page[k])) {
+				k++
+			}
+			if k < len(page) && page[k] == '=' {
+				for k++; k < len(page) && strings.ContainsRune(htmlSpace, rune(page[k])); k++ {
+				}
+				if k < len(page) && (page[k] == '"' || page[k] == '\'') {
+					end := strings.IndexByte(page[k+1:], page[k])
+					if end < 0 {
+						end = len(page) - k - 1
+					}
+					value, k = page[k+1:k+1+end], k+end+2
+				} else {
+					v := k
+					for k < len(page) && !strings.ContainsRune(htmlSpace+">", rune(page[k])) {
+						k++
+					}
+					value = page[v:k]
+				}
+			}
+			if _, seen := attrs[key]; !seen {
+				attrs[key] = value
+			}
+			j = k
+		}
+		tags = append(tags, attrs)
+		i = j
+	}
+}
 
 // TestTheMapWaitsForTheVisitor pins issue #2's behaviour, not its bytes: no
 // frame on the page has a src, so nothing loads Google on its own; the area
@@ -64,12 +123,12 @@ func TestTheMapWaitsForTheVisitor(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := string(data)
-	frames := iframeTag.FindAllString(page, -1)
-	if len(frames) != 1 || !strings.Contains(frames[0], `id="area-map"`) ||
-		!strings.Contains(frames[0], ` data-src="https://maps.google.com/`) {
-		t.Fatalf("want exactly the area map frame with its address in data-src, got %q", frames)
+	frames := startTags(page, "iframe")
+	if len(frames) != 1 || frames[0]["id"] != "area-map" ||
+		!strings.HasPrefix(frames[0]["data-src"], "https://maps.google.com/") {
+		t.Fatalf("want exactly the area map frame with its address in data-src, got %v", frames)
 	}
-	if regexp.MustCompile(`\ssrc=`).MatchString(frames[0]) {
+	if _, loads := frames[0]["src"]; loads {
 		t.Fatal("the area map frame has a src, so Google loads before the visitor asks")
 	}
 	for _, want := range []string{`<button id="show-map" class="button" type="button"`, `<section class="section privacy" id="privacidad">`} {
@@ -95,7 +154,7 @@ func TestTheMapWaitsForTheVisitor(t *testing.T) {
 //     footer. TestScriptKeepsTheDeliveredLines proves app.js is otherwise the
 //     delivered script, and TestTheMapWaitsForTheVisitor pins the behaviour.
 var exported = map[string]string{
-	"index.html":                    "54785f500fda2103c59ab1186e34d3ad9cd5ca11cf4b3749134082054aa4c7d6",
+	"index.html":                    "c7fb6536261466cafa7f91d9608b66e92bbf830501a22d6cba6c917964dfbf72",
 	"style.css":                     "39327b42d74deff549819cbb1b7b1a16127af337b156452b9f1026b1db034df7",
 	"app.js":                        "967388cb5a6afb2ed568db7cad15f6dbbe44437c923b3db30d1ad5e1aef0b41f",
 	"assets/font-0.ttf":             "b0ae3e89a7d3ef2b1838bb4b1ceb0b17cc3435af061eee809d76aa623ff116e9",
