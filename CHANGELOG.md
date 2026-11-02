@@ -7,6 +7,25 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-02
+
+### Added
+
+- A short privacy notice in Spanish and English, folded above the footer
+  (`/#privacidad`): no cookies or device storage, minimal server records
+  without the visitor's address, Cloudflare as the delivery network, the map
+  on request, the WhatsApp and email hand-offs, and how to ask about one's
+  data under Colombia's Ley 1581 and, for EU visitors, the GDPR. The owner
+  decided on 2026-11-02 to publish it (issue #2, option 2).
+
+### Changed
+
+- The area map loads only when the visitor asks for it: its frame waits
+  behind a "Mostrar el mapa / Show the map" button, and the place buttons
+  load it as before, so Google is contacted only on that request.
+  `compliance.json` now records Google Maps as needing no prior consent and
+  the privacy page as published.
+
 ## [0.1.3] - 2026-11-02
 
 ### Changed

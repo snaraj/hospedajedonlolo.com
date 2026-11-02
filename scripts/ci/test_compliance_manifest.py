@@ -73,8 +73,10 @@ SITE_CSP = (
     "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
 )
 # The site's page in miniature: an inline data: favicon, its own stylesheet,
-# photographs and film, the Google Maps frame, hand-off links that are not
-# loads, its one script, and the edge's injected script the fixture declares.
+# photographs and film, the Google Maps frame waiting behind its button (no
+# src until the visitor asks, issue #2), the privacy notice, hand-off links
+# that are not loads, its one script, and the edge's injected script the
+# fixture declares.
 SITE_HTML = (
     '<!doctype html><html lang="es"><head>'
     '<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27%3E%3C/svg%3E">'
@@ -84,8 +86,10 @@ SITE_HTML = (
     '<a href="mailto:owner@site.example">correo</a> <a href="tel:+570000000000">llamar</a>'
     '<img src="assets/hero.webp" alt=""><img loading="lazy" src="assets/garden.webp" alt="">'
     '<video controls playsinline><source src="assets/film.mp4" type="video/mp4"></video>'
-    '<iframe id="area-map" title="map" loading="lazy" '
-    'src="https://maps.google.com/maps?q=Somewhere&amp;z=12&amp;output=embed"></iframe>'
+    '<div class="map-frame"><iframe id="area-map" title="map" loading="lazy" '
+    'data-src="https://maps.google.com/maps?q=Somewhere&amp;z=12&amp;output=embed"></iframe>'
+    '<button id="show-map" class="button" type="button">Mostrar el mapa</button></div>'
+    '<section class="section privacy" id="privacidad"><details><summary>Privacidad</summary></details></section>'
     '</main><script src="app.js"></script>'
     f"{INJECTED}"
     "</body></html>"
@@ -335,27 +339,23 @@ class JudgeTests(unittest.TestCase):
         self.assertRefused(gate.judge(published, document(), {"/privacy": wrong}), "not served as text/html")
 
     def site(self, value: dict | None = None, html: str = SITE_HTML, csp: str = SITE_CSP) -> gate.Verdict:
-        return gate.judge(site_manifest() if value is None else value, document(html=html, Content_Security_Policy=csp), {})
+        # The privacy notice is a section of the page itself, so its path answers with the page.
+        page = document(html=html, Content_Security_Policy=csp)
+        return gate.judge(site_manifest() if value is None else value, page, {"/#privacidad": page})
 
     def test_the_sites_own_policy_and_page_pass_with_the_shipped_declarations(self) -> None:
         verdict = self.site()
         self.assertEqual(verdict.refusals, [])
-        decision = "https://github.com/snaraj/hospedajedonlolo.com/issues/2"
-        for origin in ("https://maps.google.com", "https://www.google.com"):
-            self.assertIn(f"third party {origin} consent pending: {decision}", verdict.notes)
+        # Issue #2 is decided: the map waits for the visitor and the notice is published.
+        self.assertFalse([note for note in verdict.notes if "pending" in note], verdict.notes)
         for target in ("https://wa.me", "mailto:"):
             self.assertTrue(any(note.startswith(f"hand-off {target} (") for note in verdict.notes), verdict.notes)
 
     def test_each_google_origin_must_be_declared_on_its_own(self) -> None:
         for origin, fragments in (
             ("https://www.google.com", ("frame-src admits the undeclared origin https://www.google.com",)),
-            (
-                "https://maps.google.com",
-                (
-                    "frame-src admits the undeclared origin https://maps.google.com",
-                    "loads iframe from the undeclared origin https://maps.google.com",
-                ),
-            ),
+            # The page no longer loads the frame on its own, so only the CSP names it.
+            ("https://maps.google.com", ("frame-src admits the undeclared origin https://maps.google.com",)),
         ):
             with self.subTest(origin=origin):
                 value = site_manifest()
@@ -1106,6 +1106,8 @@ class LiveModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "compliance.json"
             value = site_manifest()
+            # The shipped map needs no prior consent (issue #2); a pending question is still noted.
+            value["thirdParties"][1].update(consent="pending", decision="https://github.com/owner/site/issues/1")
             path.write_text(json.dumps(value))
             output = io.StringIO()
             with redirect_stdout(output):
@@ -1164,7 +1166,8 @@ class LiveModeTests(unittest.TestCase):
 
     def test_an_answer_past_the_byte_cap_is_refused_not_judged_by_its_prefix(self) -> None:
         # Judged whole, the answer is refused for the script past the cap.
-        whole = gate.judge(site_manifest(), gate.Fetched(SITE, 200, headers(Content_Security_Policy=SITE_CSP), PAST_CAP), {})
+        past_cap = gate.Fetched(SITE, 200, headers(Content_Security_Policy=SITE_CSP), PAST_CAP)
+        whole = gate.judge(site_manifest(), past_cap, {"/#privacidad": past_cap})
         self.assertEqual(len(whole.refusals), 1, whole.refusals)
         self.assertIn("inline script this repository did not build", whole.refusals[0])
         with self.assertRaisesRegex(ValueError, f"larger than the {gate.BODY_CAP_BYTES}-byte cap"):
