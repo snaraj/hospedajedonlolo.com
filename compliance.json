@@ -14,23 +14,21 @@
     {
       "origin": "https://maps.google.com",
       "purpose": "The area map: the page embeds a Google Maps frame, and the map buttons point it at nearby places",
-      "consent": "pending",
-      "decision": "https://github.com/snaraj/hospedajedonlolo.com/issues/2",
-      "reason": "A Google embed loads in the visitor's browser once the lazily loaded map nears the screen, and it can set Google's own cookies; whether that needs the visitor's consent is an open owner decision"
+      "consent": "not-required",
+      "reason": "The frame has no address until the visitor asks for the map with \"Show the map\" or a place button, so Google is contacted, and can set its own cookies, only on that request; the privacy notice says so (owner decision, issue #2, option 2)"
     },
     {
       "origin": "https://www.google.com",
       "purpose": "The same area map: maps.google.com redirects the frame to www.google.com, which serves it",
-      "consent": "pending",
-      "decision": "https://github.com/snaraj/hospedajedonlolo.com/issues/2",
-      "reason": "The frame's real origin after the redirect, with the same open consent question as maps.google.com"
+      "consent": "not-required",
+      "reason": "The frame's real origin after the redirect, contacted only after the same visitor request as maps.google.com"
     }
   ],
   "legalPages": [
     {
       "id": "privacy",
-      "status": "pending",
-      "decision": "https://github.com/snaraj/hospedajedonlolo.com/issues/2"
+      "status": "published",
+      "path": "/#privacidad"
     }
   ],
   "edgeObservations": [
