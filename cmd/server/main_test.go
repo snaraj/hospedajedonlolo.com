@@ -123,30 +123,30 @@ func withFilm(t *testing.T, root string, media []site.Object) ([]site.Object, []
 	return append(media, site.Object{Name: "film.mp4", SHA256: digest, Size: int64(len(film)), ContentType: "video/mp4"}), film, path
 }
 
-// TestBuildSiteWithholdsWhatItIsGiven drives the configuration path run uses,
-// without a socket: a withheld film must stay pinned and verified, answer 404,
-// and leave the photograph beside it served.
-func TestBuildSiteWithholdsWhatItIsGiven(t *testing.T) {
+// TestBuildSiteServesTheFilmItVerified drives the configuration path run uses,
+// without a socket: the film is served byte for byte beside the photograph,
+// and a film missing from the volume stops construction.
+func TestBuildSiteServesTheFilmItVerified(t *testing.T) {
 	root, media := fixtureVolume(t)
 	media, film, filmPath := withFilm(t, root, media)
 	env := map[string]string{"MEDIA_ROOT": root, "MEDIA_MAX_CONCURRENT": "2"}
-	origin, _, _, err := buildSite(slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, site.Pages, media, []string{"film.mp4"})
+	origin, _, _, err := buildSite(slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, site.Pages, media)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer origin.Close()
-	for path, want := range map[string]int{"/assets/film.mp4": http.StatusNotFound, "/assets/hero.webp": http.StatusOK} {
+	for path, want := range map[string][]byte{"/assets/film.mp4": film, "/assets/hero.webp": []byte("webp-fixture")} {
 		w := httptest.NewRecorder()
 		origin.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
-		if w.Code != want || (want == http.StatusNotFound && strings.Contains(w.Body.String(), string(film))) {
-			t.Fatalf("%s: %d, want %d", path, w.Code, want)
+		if w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), want) {
+			t.Fatalf("%s: %d", path, w.Code)
 		}
 	}
 	if err := os.Remove(filmPath); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := buildSite(slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, site.Pages, media, []string{"film.mp4"}); err == nil {
-		t.Fatal("a withheld film missing from the volume was accepted")
+	if _, _, _, err := buildSite(slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, site.Pages, media); err == nil {
+		t.Fatal("a film missing from the volume was accepted")
 	}
 }
 
@@ -162,7 +162,7 @@ func TestRunServesThenDrainsOnSignal(t *testing.T) {
 	var logs bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, slog.New(slog.NewJSONHandler(&logs, nil)), func(k string) string { return env[k] }, listener, site.Pages, media, []string{"film.mp4"})
+		done <- run(ctx, slog.New(slog.NewJSONHandler(&logs, nil)), func(k string) string { return env[k] }, listener, site.Pages, media)
 	}()
 	base := "http://" + listener.Addr().String()
 	var response *http.Response
@@ -179,14 +179,14 @@ func TestRunServesThenDrainsOnSignal(t *testing.T) {
 	if response.StatusCode != http.StatusOK || string(body) != "webp-fixture" {
 		t.Fatalf("media through the real server: %d %q", response.StatusCode, body)
 	}
-	withheld, err := http.Get(base + "/assets/film.mp4")
+	movie, err := http.Get(base + "/assets/film.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
-	withheldBody, _ := io.ReadAll(withheld.Body)
-	withheld.Body.Close()
-	if withheld.StatusCode != http.StatusNotFound || bytes.Contains(withheldBody, film) {
-		t.Fatalf("withheld film through the real server: %d", withheld.StatusCode)
+	movieBody, _ := io.ReadAll(movie.Body)
+	movie.Body.Close()
+	if movie.StatusCode != http.StatusOK || !bytes.Equal(movieBody, film) {
+		t.Fatalf("film through the real server: %d", movie.StatusCode)
 	}
 	page, err := http.Get(base + "/")
 	if err != nil {
@@ -217,12 +217,12 @@ func TestRunRefusesBadConfigurationBeforeListening(t *testing.T) {
 		"wrong media bytes": {"MEDIA_ROOT": t.TempDir(), "MEDIA_MAX_CONCURRENT": "2"},
 	}
 	for name, env := range cases {
-		err := run(context.Background(), slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, nil, site.Pages, media, nil)
+		err := run(context.Background(), slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, nil, site.Pages, media)
 		if err == nil {
 			t.Fatalf("%s: started", name)
 		}
 	}
-	err := run(context.Background(), slog.New(slog.DiscardHandler), func(string) string { return "" }, nil, fstest.MapFS{}, media, nil)
+	err := run(context.Background(), slog.New(slog.DiscardHandler), func(string) string { return "" }, nil, fstest.MapFS{}, media)
 	if err == nil {
 		t.Fatal("empty pages started")
 	}
@@ -241,12 +241,12 @@ func TestRunReportsListenAndServeFailures(t *testing.T) {
 	env := map[string]string{"PORT": itoa(port), "MEDIA_ROOT": root, "MEDIA_MAX_CONCURRENT": "1"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := run(ctx, slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, nil, site.Pages, media, nil); err == nil {
+	if err := run(ctx, slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, nil, site.Pages, media); err == nil {
 		t.Fatal("listening on an occupied port succeeded")
 	}
 	closed, _ := net.Listen("tcp", "127.0.0.1:0")
 	closed.Close()
-	if err := run(context.Background(), slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, closed, site.Pages, media, nil); err == nil {
+	if err := run(context.Background(), slog.New(slog.DiscardHandler), func(k string) string { return env[k] }, closed, site.Pages, media); err == nil {
 		t.Fatal("serving on a closed listener succeeded")
 	}
 }
@@ -263,9 +263,10 @@ func itoa(n int) string {
 }
 
 func TestProductionInputsAreThePublishedSite(t *testing.T) {
-	pages, media, withheld := productionInputs()
-	if pages != site.Pages || len(media) != len(site.Media) || !slices.Equal(withheld, site.Withheld) || len(withheld) == 0 {
-		t.Fatalf("production inputs drifted from the site package: %d media, withheld %v", len(media), withheld)
+	pages, media := productionInputs()
+	if pages != site.Pages || !slices.Equal(media, site.Media) ||
+		!slices.ContainsFunc(media, func(o site.Object) bool { return o.Name == "don-lolo.mp4" }) {
+		t.Fatalf("production inputs drifted from the site package: %d media", len(media))
 	}
 }
 

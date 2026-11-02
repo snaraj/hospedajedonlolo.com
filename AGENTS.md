@@ -34,7 +34,8 @@ English switch) static page — rooms, the farm, a film, an area map, and a
 booking form that hands the visitor's message to WhatsApp or to their own
 mail client. It is a single dependency-free Go binary — `cmd/server` over
 `internal/server` — that embeds the page, its stylesheet, its script and its
-six fonts from `site/` byte for byte, and serves fourteen photographs and one
+six fonts from `site/` byte for byte (the script adds only the
+owner-requested language default), and serves fourteen photographs and one
 film from a read-only volume, each pinned by name, size and SHA-256 in
 `site/media.go`. It ships as a distroless multi-arch container plus a Helm
 chart and is deployed by digest onto a self-hosted Kubernetes platform. The
@@ -162,10 +163,9 @@ Numbered for citation, repo-scoped, none negotiable in code:
     mismatch — a missing, extra-linked, symlinked, resized or altered file.
     It then serves only the bytes it verified, held in memory, so nothing
     written, replaced or removed on the volume afterwards reaches a visitor:
-    a visitor can only ever see the defined content. Names in
-    `site.Withheld` (the film) are verified the same way but never served:
-    lifting one is a reviewed one-line change that needs the owner's explicit
-    decision on the platform's zero-spend boundary for public video.
+    a visitor can only ever see the defined content. The film is served like
+    the photographs, under the owner's 2026-11-02 decision on the platform's
+    zero-spend boundary for public video (issue #5).
     `scripts/stage-media.sh` is the one way files reach that layout.
 12. **No secrets, no noncanonical personal data.** No credential, token,
     private host fact, private contact detail, or new personal data enters this

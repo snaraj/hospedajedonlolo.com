@@ -6,18 +6,54 @@ import (
 	"io/fs"
 	"regexp"
 	"sort"
+	"strings"
 	"testing"
 )
+
+// deliveredScript is app.js exactly as the owner delivered it on 2026-10-31.
+const deliveredScript = "816c39710259d64e97b45795824353fb9944de1775a258c93295d331c1c85adf"
+
+// languageDefault is the whole owner-requested addition to app.js, spelled
+// out so that changing what it does is an edit to this test, not only to a
+// regenerated pin. It takes the first Spanish or English entry of the
+// browser's preferences; anything else opens in English. It switches by
+// clicking the delivered toggle, so the toggle's own code is untouched.
+const languageDefault = "// Open in the visitor's browser language: the first Spanish or English preference wins, and any other browser gets English. The toggle still switches freely.\n" +
+	"if([...(navigator.languages||[]),navigator.language].map(tag=>String(tag||'').slice(0,2).toLowerCase()).find(tag=>tag==='es'||tag==='en')!=='es')toggle.click();\n"
+
+// TestScriptKeepsTheDeliveredLines proves the only change to the delivered
+// script is the language default: its two lines sit directly after the
+// toggle's handler, and dropping them gives back the delivered bytes exactly.
+func TestScriptKeepsTheDeliveredLines(t *testing.T) {
+	data, err := fs.ReadFile(Pages, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitAfter(string(data), "\n")
+	if len(lines) < 7 || !strings.HasPrefix(lines[4], "toggle.addEventListener('click'") ||
+		lines[5]+lines[6] != languageDefault {
+		t.Fatal("the language default is not exactly the two lines after the toggle's handler")
+	}
+	delivered := strings.Join(lines[:5], "") + strings.Join(lines[7:], "")
+	if sum := sha256.Sum256([]byte(delivered)); hex.EncodeToString(sum[:]) != deliveredScript {
+		t.Fatal("app.js changed beyond the language default")
+	}
+}
 
 // exported pins every embedded file to the bytes the owner delivered on
 // 2026-10-31 (CHECKSUMS.sha256 of the export, source commit c39ac49d). This is
 // the "content does not change" invariant made executable: an edit to the
 // page, its styles, its script or a font fails here and must be a reviewed,
 // deliberate change to this table.
+//
+// One deliberate change so far: on 2026-11-02 the owner asked that the page
+// open in the visitor's browser language (issue #5). app.js gains one comment
+// line and one statement after the toggle's handler; every delivered line
+// before them is unchanged, which TestScriptKeepsTheDeliveredLines proves.
 var exported = map[string]string{
 	"index.html":                    "0a264cdd996cb02cf4d47a22d0533f9b604ba22717ee35b73b6fd8b16d09682a",
 	"style.css":                     "cd7561d9751f150e7cdc1f04450fc15c0dd1978803706f62798a4b1eff557446",
-	"app.js":                        "816c39710259d64e97b45795824353fb9944de1775a258c93295d331c1c85adf",
+	"app.js":                        "457dc46b7836fdade9c8b8553aba3b5d410396bde1359e4a8967641db371d601",
 	"assets/font-0.ttf":             "b0ae3e89a7d3ef2b1838bb4b1ceb0b17cc3435af061eee809d76aa623ff116e9",
 	"assets/font-1.ttf":             "376427b5322148d8de1e03f263bcca4935a2d60ba71d9f94f4947ab664c711ae",
 	"assets/font-2.ttf":             "b79a2ea7a38f33fd96a282fadb9ce97626bb0724a44d21075859f0e50239993a",
@@ -131,9 +167,7 @@ func TestMediaPinsAreWellFormed(t *testing.T) {
 	if len(Media) != 15 {
 		t.Errorf("the delivered page uses 15 media files, the table pins %d", len(Media))
 	}
-	for _, name := range Withheld {
-		if !names[name] {
-			t.Errorf("withheld %s is not a pinned media file", name)
-		}
+	if !names["don-lolo.mp4"] {
+		t.Error("the delivered film is not a pinned media file")
 	}
 }

@@ -41,10 +41,7 @@ type verifiedObject struct {
 // openMediaStore validates the configuration, then reads and hashes every
 // pinned file. Errors never name a filesystem path: the mount point is an
 // operator fact, not something a log reader needs.
-//
-// A withheld object is verified like every other, so the volume must still
-// hold its exact bytes, but its bytes are not kept and it is never served.
-func openMediaStore(root string, maxConcurrent int, objects []site.Object, withheld []string) (*mediaStore, error) {
+func openMediaStore(root string, maxConcurrent int, objects []site.Object) (*mediaStore, error) {
 	if !filepath.IsAbs(root) || maxConcurrent < 1 || maxConcurrent > MaxMediaConcurrency || len(objects) == 0 {
 		return nil, errors.New("media configuration is incomplete")
 	}
@@ -62,12 +59,6 @@ func openMediaStore(root string, maxConcurrent int, objects []site.Object, withh
 		if err := store.admit(opened, object); err != nil {
 			return nil, err
 		}
-	}
-	for _, name := range withheld {
-		if _, pinned := store.objects[name]; !pinned {
-			return nil, fmt.Errorf("withheld media %s is not pinned", name)
-		}
-		delete(store.objects, name)
 	}
 	return store, nil
 }

@@ -1,20 +1,20 @@
 # hospedajedonlolo.com
 
 The public page of Hospedaje Don Lolo, a family farm-stay on the road to the
-hot springs near Santa Rosa de Cabal, Colombia: one bilingual page (Spanish,
-with an English switch) showing the rooms, the farm, a short film and an area
+hot springs near Santa Rosa de Cabal, Colombia: one bilingual page (Spanish
+and English, opening in the visitor's browser language, with a switch)
+showing the rooms, the farm, a short film and an area
 map, with a booking form that hands the visitor's message to WhatsApp or to
 their own mail client.
 
 It is a single standard-library Go server. The page, its stylesheet, its
-script and its six fonts (`site/`) are embedded in the binary byte for byte;
+script and its six fonts (`site/`) are embedded in the binary byte for byte,
+except two lines the owner asked for that pick the opening language;
 the fourteen photographs and the film live on a read-only volume and are
 served at `/assets/<name>`. Every one of those files is pinned by SHA-256 —
 the embedded ones in `site/site_test.go`, the volume ones in `site/media.go` —
 and the server refuses to start if the volume does not match, then serves
-the verified bytes from memory. The film is verified but withheld from
-delivery (`site.Withheld`) until the owner lifts the platform's zero-spend
-boundary for public video; the page shows its poster meanwhile. There is no
+the verified bytes from memory, with Range support for the film. There is no
 frontend build, no Node and no npm.
 
 ## Run it locally

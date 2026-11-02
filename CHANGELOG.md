@@ -7,6 +7,25 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-02
+
+### Changed
+
+- The film is delivered. The owner decided on 2026-11-02 to serve it from the
+  site's own volume like the photographs, with Range support, accepting the
+  platform's recorded risk for public video on a self-serve edge plan.
+- The page opens in the visitor's browser language: the first Spanish or
+  English preference wins, and any other browser gets English. Location is not
+  used. The language switch works exactly as before.
+- `compliance.json` declares the two edge behaviours naranjo.online declares:
+  the bot-detection loader this origin's CSP blocks, and the NEL reporting
+  endpoint.
+
+### Removed
+
+- The withheld-media mechanism (`site.Withheld` and the server's `Withheld`
+  option), unused once the film is delivered.
+
 ## [0.1.1] - 2026-11-01
 
 ### Added
