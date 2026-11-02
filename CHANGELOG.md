@@ -7,6 +7,19 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-02
+
+### Changed
+
+- The compliance gate knows a third kind of edge observation,
+  `injected-script-origin`: an external script the edge injects from another
+  origin. Like an injected inline script, a declaration passes only while an
+  enforced policy blocks scripts from that origin, and it is stale once the
+  script is gone.
+- `compliance.json` declares the edge's free Web Analytics beacon this way.
+  The owner decided on 2026-11-02 to keep it as it is; this origin's CSP
+  blocks it, so it never runs and collects nothing. The live check now passes.
+
 ## [0.1.2] - 2026-11-02
 
 ### Changed

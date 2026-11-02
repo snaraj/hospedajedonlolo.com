@@ -226,6 +226,57 @@ class JudgeTests(unittest.TestCase):
         attr = "default-src 'self'; script-src-attr 'nonce-bm9uY2U='; frame-ancestors 'none'"
         self.assertEqual(gate.judge(manifest(), document(Content_Security_Policy=attr), {}).refusals, [])
 
+    def test_a_declared_injected_script_origin_passes_only_while_the_csp_blocks_it(self) -> None:
+        # The edge's analytics beacon, as the edge injects it: an external
+        # module script with SRI. Declared, it passes only while an enforced
+        # policy refuses scripts from its origin, because that block is the
+        # declaration's whole reason.
+        beacon = "https://beacon.example"
+        tag = f'<script type="module" src="{beacon}/beacon.min.js" integrity="sha512-abc=" crossorigin="anonymous"></script>'
+        html = HTML.replace("</body>", tag + "</body>")
+        declared = manifest()
+        declared["edgeObservations"].append(
+            {"kind": "injected-script-origin", "origin": beacon, "reason": "edge", "issue": "https://github.com/owner/infra/issues/3"}
+        )
+        verdict = gate.judge(declared, document(html=html), {})
+        self.assertEqual(verdict.refusals, [])
+        self.assertIn(f"declared injected script origin seen: {beacon}", verdict.notes)
+        self.assertRefused(gate.judge(manifest(), document(html=html), {}), f"loads script from the undeclared origin {beacon}")
+        message = f"declared injected origin {beacon}, which this CSP can let run"
+        for csp in (
+            f"default-src 'self'; script-src 'self' {beacon}; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' beacon.example/beacon.min.js; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' http://beacon.example; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' https:; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' *.example; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' 'strict-dynamic'; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' 'nonce-bm9uY2U='; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' 'sha512-abc='; frame-ancestors 'none'",
+            f"default-src 'self' {beacon}; frame-ancestors 'none'",
+            # No directive governs scripts at all, so nothing blocks them.
+            "frame-ancestors 'none'; object-src 'none'",
+            # An engine without script-src-elem reads script-src.
+            f"default-src 'self'; script-src-elem 'self'; script-src 'self' {beacon}; frame-ancestors 'none'",
+        ):
+            with self.subTest(csp=csp):
+                self.assertRefused(gate.judge(declared, document(html=html, Content_Security_Policy=csp), {}), message)
+        # One enforced policy that blocks it is enough, as for inline scripts.
+        admitting = f"default-src 'self'; script-src 'self' {beacon}; frame-ancestors 'none'"
+        both = gate.Fetched(SITE, 200, [("Content-Security-Policy", admitting), *headers()], html.encode())
+        self.assertFalse(any(message in refusal for refusal in gate.judge(declared, both, {}).refusals))
+        # Another origin's host never admits it, and a stylesheet from the
+        # declared origin is not the declared script.
+        other = "default-src 'self'; script-src 'self' https://elsewhere.example; frame-ancestors 'none'"
+        self.assertFalse(any(message in r for r in gate.judge(declared, document(html=html, Content_Security_Policy=other), {}).refusals))
+        sheet = HTML.replace("</body>", f'<link rel="stylesheet" href="{beacon}/x.css"></body>')
+        self.assertRefused(gate.judge(declared, document(html=sheet), {}), f"loads link stylesheet from the undeclared origin {beacon}")
+        # A declaration whose script no longer occurs is stale.
+        self.assertRefused(gate.judge(declared, document(), {}), f"injected script origin {beacon}, which no longer occurs")
+        # Check mode requires the origin.
+        broken = manifest()
+        broken["edgeObservations"].append({"kind": "injected-script-origin", "reason": "edge", "issue": "https://github.com/owner/infra/issues/3"})
+        self.assertTrue(any("injected script loads from" in refusal for refusal in gate.validate(broken)))
+
     def test_framing_must_be_denied_somewhere(self) -> None:
         csp = "default-src 'self'"
         self.assertRefused(gate.judge(manifest(), document(Content_Security_Policy=csp, X_Frame_Options=None), {}), "framing")
