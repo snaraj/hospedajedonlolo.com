@@ -144,7 +144,7 @@ func TestTheMapWaitsForTheVisitor(t *testing.T) {
 // page, its styles, its script or a font fails here and must be a reviewed,
 // deliberate change to this table.
 //
-// Two deliberate changes so far, both owner decisions of 2026-11-02:
+// Three deliberate changes so far, all owner decisions of 2026-11-02:
 //   - the page opens in the visitor's browser language (issue #5): app.js
 //     gains one comment line and one statement after the toggle's handler;
 //   - privacy (issue #2, option 2): the area map loads only when the visitor
@@ -153,8 +153,10 @@ func TestTheMapWaitsForTheVisitor(t *testing.T) {
 //     rules at the end), and a short bilingual privacy notice sits above the
 //     footer. TestScriptKeepsTheDeliveredLines proves app.js is otherwise the
 //     delivered script, and TestTheMapWaitsForTheVisitor pins the behaviour.
+//   - network-error reports (issue #10): the edge stopped requesting them,
+//     so the privacy notice drops that clause in Spanish and in English.
 var exported = map[string]string{
-	"index.html":                    "c7fb6536261466cafa7f91d9608b66e92bbf830501a22d6cba6c917964dfbf72",
+	"index.html":                    "147ab8a67ba6f83fa06b829f52a82785041651ae30b0a3b3c344321f6d03ead9",
 	"style.css":                     "39327b42d74deff549819cbb1b7b1a16127af337b156452b9f1026b1db034df7",
 	"app.js":                        "967388cb5a6afb2ed568db7cad15f6dbbe44437c923b3db30d1ad5e1aef0b41f",
 	"assets/font-0.ttf":             "b0ae3e89a7d3ef2b1838bb4b1ceb0b17cc3435af061eee809d76aa623ff116e9",
