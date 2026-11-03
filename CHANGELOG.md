@@ -7,6 +7,14 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-02
+
+### Changed
+
+- The CodeQL analysis workflow moves its `init`/`analyze` pair to
+  `github/codeql-action` v4.39.1, the pin naranjo.online already runs. This
+  carries Dependabot PR #4 under the signed release identity (#12).
+
 ## [0.1.5] - 2026-11-02
 
 ### Changed
