@@ -7,6 +7,16 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-02
+
+### Changed
+
+- The privacy notice no longer says the visitor's browser may send
+  network-error reports, in Spanish or in English: the delivery network
+  stopped requesting them on 2026-11-02. `compliance.json` drops the matching
+  reporting-endpoint observation, which the live check would otherwise refuse
+  as stale (#10).
+
 ## [0.1.4] - 2026-11-02
 
 ### Added
