@@ -1,18 +1,30 @@
-# The build stage runs natively on the build platform and cross-compiles for
-# each target; only the final stage is per-architecture. Nothing in this file
-# reads build arguments other than the target platform, so the image is a pure
-# function of the source tree.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.10-trixie@sha256:a050dcceee6eb9bf110151662dfac7662f3bec40927c7dee48731e3d92083d42 AS backend
-ARG TARGETOS
-ARG TARGETARCH
+# The build stages run natively on the build platform and cross-compile for
+# each target; only the compile and the final stage are per-architecture.
+# Nothing in this file reads build arguments other than the target platform,
+# so the image is a pure function of the source tree.
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.10-trixie@sha256:a050dcceee6eb9bf110151662dfac7662f3bec40927c7dee48731e3d92083d42 AS backend-source
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=readonly
 WORKDIR /src
 COPY go.mod ./
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY site/ site/
-RUN go test ./... && \
-    GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+
+# TESTS NEVER TOUCH WHAT SHIPS. The battery runs in a stage of its own. The
+# stage that compiles the binary starts again from the source stage and
+# copies only the battery's empty pass mark, so it still waits for every test
+# to pass, while nothing a test does (a file it writes, a build-cache entry)
+# can reach the binary. That is what lets the release classifier treat Go
+# test files as no-artifact (scripts/ci/release_contract.py). The battery
+# names no target, so both architectures share one run of it.
+FROM backend-source AS backend-test
+RUN go test ./... && touch /backend-tested
+
+FROM backend-source AS backend
+COPY --from=backend-test /backend-tested /backend-tested
+ARG TARGETOS
+ARG TARGETARCH
+RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
     go build -trimpath -ldflags="-s -w -buildid=" -o /out/hospedajedonlolo-com ./cmd/server
 
 # Shell-less, package-manager-less, non-root. The photographs and film are a

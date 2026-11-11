@@ -1,7 +1,7 @@
 # The no-artifact classifier — how the verdict is made trustworthy
 
 `AGENTS.md` requirement 10 states the RULE: a range whose every commit is
-individually confined to the closed documentation allowlist classifies
+individually confined to the closed no-artifact allowlist classifies
 no-artifact, advances nothing, and skips the publisher. This document states
 the MECHANISM behind that verdict — the reasoning a reviewer needs when the
 orchestrator denies, and the attack the current design exists to defeat. It

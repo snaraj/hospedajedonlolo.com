@@ -30,6 +30,16 @@ const (
 	// assetCacheControl lets the edge and browsers keep fonts and media for a
 	// day; the strong SHA-256 ETag makes the revalidation after that a 304.
 	assetCacheControl = "public, max-age=86400"
+	// immutableCacheControl is for a content-addressed name, <stem>.<sha256>.<ext>,
+	// which the server answers only while the digest is the file's own. Such a
+	// URL can never name other bytes, so it may be kept for a year; the page,
+	// still revalidated on every visit, names each stylesheet, script, font and
+	// media file this way, so a release can never pair new HTML with an old file.
+	immutableCacheControl = "public, max-age=31536000, immutable"
+	// missCacheControl keeps a content-addressed miss out of every cache: during
+	// a rollout the previous release's Pod cannot know the next release's
+	// digests, and a stored 404 would outlive the rollout.
+	missCacheControl = "no-store"
 
 	// writeIdleTimeout is the longest a response may stall between writes.
 	writeIdleTimeout = 30 * time.Second

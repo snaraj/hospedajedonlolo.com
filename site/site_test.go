@@ -3,11 +3,14 @@ package site
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io/fs"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // deliveredScript is app.js exactly as the owner delivered it on 2026-10-31.
@@ -28,27 +31,89 @@ const languageDefault = "// Open in the visitor's browser language: the first Sp
 const mapOnRequest = "// Load the area map only when the visitor asks for it (issue #2): Google is contacted after a click on \"Show the map\" or on a place, never on its own.\n" +
 	"const areaMap=document.getElementById('area-map'),showMap=document.getElementById('show-map');showMap.addEventListener('click',()=>{areaMap.src=areaMap.dataset.src;showMap.remove()});document.querySelectorAll('.map-select').forEach(button=>button.addEventListener('click',()=>showMap.remove()));\n"
 
+// scriptEdits are the reviewed changes made INSIDE delivered lines, each the
+// delivered text and the text that replaced it. Every one changes how the
+// script loads or degrades, never what the page shows or says.
+var scriptEdits = []struct{ delivered, shipped string }{
+	// Release 0.1.7 (issue #16): the lightbox opens the photograph's own
+	// content-addressed URL, which its button carries in data-photo, instead
+	// of building an unversioned one from a key.
+	{"dialog.querySelector('img').src='assets/'+button.dataset.photo+'.webp';", "dialog.querySelector('img').src=button.dataset.photo;"},
+	// Release 0.1.7: the page stops scrolling behind the open lightbox in
+	// engines without :has() (Firefox before 121) too. style.css locks
+	// body.lightbox-open as well as body:has(dialog[open]); the class goes on
+	// only after showModal() succeeds, so an engine without <dialog> is never
+	// left locked, and comes off on the dialog's close event, which the close
+	// button, a backdrop click and Escape all end in.
+	{"dialog.showModal();}", "dialog.showModal();document.body.classList.add('lightbox-open');}"},
+	{"if(event.target===dialog)dialog.close();});", "if(event.target===dialog)dialog.close();});dialog.addEventListener('close',()=>document.body.classList.remove('lightbox-open'));"},
+	// Release 0.1.7: where SubmitEvent.submitter does not exist (Safari
+	// before 15.4) the form reads the submit button the visitor last
+	// clicked, so an email inquiry no longer goes to WhatsApp. Implicit
+	// submission clicks the form's first submit button (WhatsApp), so the
+	// Enter key still sends there; where submitter exists, it decides.
+	{"departure=form.elements.departure;", "departure=form.elements.departure;let clicked;form.querySelectorAll('[type=submit]').forEach(button=>button.addEventListener('click',()=>clicked=button));"},
+	{"event.submitter?.value==='email'", "(event.submitter||clicked)?.value==='email'"},
+}
+
 // TestScriptKeepsTheDeliveredLines proves the only changes to the delivered
-// script are the two owner-requested additions: the language default's two
+// script are the two owner-requested additions (the language default's two
 // lines directly after the toggle's handler, and the map's two lines at the
-// end. Dropping both gives back the delivered bytes exactly.
+// end) and the named scriptEdits. Dropping both additions and undoing every
+// edit gives back the delivered bytes exactly.
 func TestScriptKeepsTheDeliveredLines(t *testing.T) {
 	data, err := fs.ReadFile(Pages, "app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.SplitAfter(string(data), "\n")
+	if err := undoScriptChanges(string(data)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// undoScriptChanges is TestScriptKeepsTheDeliveredLines's check, separate so
+// its own test can feed it altered scripts.
+func undoScriptChanges(script string) error {
+	lines := strings.SplitAfter(script, "\n")
 	last := len(lines) - 1 // SplitAfter leaves an empty final element after the closing newline
 	if len(lines) < 10 || lines[last] != "" || !strings.HasPrefix(lines[4], "toggle.addEventListener('click'") ||
 		lines[5]+lines[6] != languageDefault {
-		t.Fatal("the language default is not exactly the two lines after the toggle's handler")
+		return errors.New("the language default is not exactly the two lines after the toggle's handler")
 	}
 	if lines[last-2]+lines[last-1] != mapOnRequest {
-		t.Fatal("the map-on-request block is not exactly the script's last two lines")
+		return errors.New("the map-on-request block is not exactly the script's last two lines")
 	}
 	delivered := strings.Join(lines[:5], "") + strings.Join(lines[7:last-2], "")
+	for _, edit := range scriptEdits {
+		if strings.Count(delivered, edit.shipped) != 1 {
+			return fmt.Errorf("the reviewed edit %q is not in the script exactly once", edit.shipped)
+		}
+		delivered = strings.Replace(delivered, edit.shipped, edit.delivered, 1)
+	}
 	if sum := sha256.Sum256([]byte(delivered)); hex.EncodeToString(sum[:]) != deliveredScript {
-		t.Fatal("app.js changed beyond the language default")
+		return errors.New("app.js changed beyond the language default, the map block and the reviewed edits")
+	}
+	return nil
+}
+
+func TestTheScriptCheckSeesEveryChange(t *testing.T) {
+	data, err := fs.ReadFile(Pages, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	for name, altered := range map[string]string{
+		"an edit undone":       strings.Replace(script, scriptEdits[0].shipped, scriptEdits[0].delivered, 1),
+		"an edit made twice":   strings.Replace(script, scriptEdits[0].shipped, scriptEdits[0].shipped+scriptEdits[0].shipped, 1),
+		"an unreviewed change": strings.Replace(script, "dialog.showModal();", "dialog.show();", 1),
+		"a line appended":      script + "void 0;\n",
+	} {
+		if altered == script {
+			t.Fatalf("%s: the alteration did not apply", name)
+		}
+		if undoScriptChanges(altered) == nil {
+			t.Errorf("%s passed the delivered-script check", name)
+		}
 	}
 }
 
@@ -138,6 +203,56 @@ func TestTheMapWaitsForTheVisitor(t *testing.T) {
 	}
 }
 
+// everyStartTag returns every start tag on the page as its lowercase name and
+// attributes, read by startTags. It over-reads rather than under-reads: a
+// "<name" inside an attribute value counts too, so nothing a parser could
+// see as an element is missed.
+func everyStartTag(page string) map[string][]map[string]string {
+	tags := map[string][]map[string]string{}
+	for _, match := range regexp.MustCompile(`<([A-Za-z][A-Za-z0-9-]*)`).FindAllStringSubmatch(page, -1) {
+		name := strings.ToLower(match[1])
+		if _, done := tags[name]; !done {
+			tags[name] = startTags(page, name)
+		}
+	}
+	return tags
+}
+
+// TestNothingOnThePageWeakensItsReferrerPolicy holds the page to the promise
+// its Referrer-Policy header makes: no request it starts names the page. An
+// element's referrerpolicy attribute replaces the document's policy for the
+// request that element makes (the map frame's no-referrer-when-downgrade sent
+// Google the page address), a <meta name="referrer"> replaces it for the whole
+// page, and a script can set either; so the only value admitted is the
+// header's own, no such meta exists, and the script never touches a referrer.
+func TestNothingOnThePageWeakensItsReferrerPolicy(t *testing.T) {
+	data, err := fs.ReadFile(Pages, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := everyStartTag(string(data))
+	if len(tags["iframe"]) != 1 || len(tags["img"]) == 0 || len(tags["a"]) == 0 {
+		t.Fatalf("the page was not read: %d frames, %d images, %d links", len(tags["iframe"]), len(tags["img"]), len(tags["a"]))
+	}
+	for name, elements := range tags {
+		for _, attrs := range elements {
+			if value, set := attrs["referrerpolicy"]; set && strings.ToLower(strings.TrimSpace(value)) != "no-referrer" {
+				t.Errorf("a <%s> asks for referrer policy %q, weaker than the page's no-referrer", name, value)
+			}
+			if name == "meta" && (strings.EqualFold(strings.TrimSpace(attrs["name"]), "referrer") || strings.EqualFold(strings.TrimSpace(attrs["http-equiv"]), "referrer-policy")) {
+				t.Errorf("a <meta> sets the referrer policy to %q", attrs["content"])
+			}
+		}
+	}
+	script, err := fs.ReadFile(Pages, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(script)), "referrer") {
+		t.Error("the script touches a referrer policy")
+	}
+}
+
 // exported pins every embedded file to the bytes the owner delivered on
 // 2026-10-31 (CHECKSUMS.sha256 of the export, source commit c39ac49d). This is
 // the "content does not change" invariant made executable: an edit to the
@@ -155,10 +270,30 @@ func TestTheMapWaitsForTheVisitor(t *testing.T) {
 //     delivered script, and TestTheMapWaitsForTheVisitor pins the behaviour.
 //   - network-error reports (issue #10): the edge stopped requesting them,
 //     so the privacy notice drops that clause in Spanish and in English.
+//
+// Release 0.1.7 (issue #16) changes delivery, never what the page shows or
+// says:
+//   - the map frame's referrerpolicy is no-referrer, the page's own policy,
+//     pinned by TestNothingOnThePageWeakensItsReferrerPolicy;
+//   - every file the page loads is named by its content address,
+//     <stem>.<sha256>.<ext>: the page's stylesheet, script, photographs and
+//     film, the stylesheet's fonts, and the lightbox's photographs, which
+//     app.js now reads whole from data-photo (scriptEdits).
+//     TestEveryReferenceIsTheContentAddressOfAPublishedFile holds every
+//     address to the bytes it names;
+//   - the tiles show smaller copies of their photographs, the hero offers
+//     two through srcset, the film's poster is a lighter copy, and the
+//     images below the fold decode asynchronously; every image but the
+//     lightbox's states its size, and the farm photograph's rule gains
+//     height:auto so its stated height cannot override its aspect ratio.
+//     TestImagesDeclareTheirSizes pins it;
+//   - older engines: the lightbox's scroll lock gains a class the script
+//     sets (style.css, scriptEdits), and the booking form falls back to the
+//     submit button last clicked where SubmitEvent.submitter is missing.
 var exported = map[string]string{
-	"index.html":                    "147ab8a67ba6f83fa06b829f52a82785041651ae30b0a3b3c344321f6d03ead9",
-	"style.css":                     "39327b42d74deff549819cbb1b7b1a16127af337b156452b9f1026b1db034df7",
-	"app.js":                        "967388cb5a6afb2ed568db7cad15f6dbbe44437c923b3db30d1ad5e1aef0b41f",
+	"index.html":                    "8f6ac07afdb15fb70ebcf87715804d2b23ec3e5f312474c057764f099cec4155",
+	"style.css":                     "5223dc42f87df1ae3a6e294246ef308df3fff408981da81eb56c1a52b29631b2",
+	"app.js":                        "7f6774ff4e6bf6a2036d5951794403f4f98375a48a3c4c73c9d4113613801e0b",
 	"assets/font-0.ttf":             "b0ae3e89a7d3ef2b1838bb4b1ceb0b17cc3435af061eee809d76aa623ff116e9",
 	"assets/font-1.ttf":             "376427b5322148d8de1e03f263bcca4935a2d60ba71d9f94f4947ab664c711ae",
 	"assets/font-2.ttf":             "b79a2ea7a38f33fd96a282fadb9ce97626bb0724a44d21075859f0e50239993a",
@@ -200,60 +335,186 @@ func TestEmbeddedFilesAreTheDeliveredBytes(t *testing.T) {
 }
 
 var (
-	assetReference = regexp.MustCompile(`assets/([A-Za-z0-9._-]+)`)
-	photoKey       = regexp.MustCompile(`data-photo="([a-z0-9-]+)"`)
+	// contentAddress is how the page names every file it loads: the
+	// published name with the SHA-256 of its bytes before the extension. The
+	// origin answers it only while the digest is the file's own
+	// (internal/server), so the stylesheet, script, fonts and media may be
+	// cached for a year and a release still reaches every visitor through the
+	// page's own revalidation.
+	contentAddress = regexp.MustCompile(`^((?:assets/)?[a-z0-9][a-z0-9-]*)\.([0-9a-f]{64})(\.[a-z0-9]+)$`)
+	// strayAsset finds every "assets/..." in the three files, wherever it is,
+	// so a reference outside the attributes pageReferences reads cannot hide.
+	strayAsset = regexp.MustCompile(`assets/[^"'\s(),]*`)
+	cssURL     = regexp.MustCompile(`url\(\s*['"]?([^'")\s]+)`)
 )
 
-// TestEveryReferenceResolvesAndNothingIsOrphaned proves the published set is
-// exactly what the page uses: every `assets/...` reference in the HTML, CSS
-// and script — including the lightbox's `assets/<data-photo>.webp` built at
-// run time — names an embedded font or a pinned media object, and every
-// font and media object is referenced by something.
-func TestEveryReferenceResolvesAndNothingIsOrphaned(t *testing.T) {
-	available := map[string]string{}
-	for _, object := range Media {
-		available[object.Name] = "media"
+// pageReferences returns every same-origin URL the page and its stylesheet
+// load: src, href, poster, data-photo (the lightbox's full photograph) and
+// each srcset candidate on every element, and every url() in the stylesheet.
+// Off-site addresses, in-page anchors and inline data are not loads from this
+// origin and are left out.
+func pageReferences(pages fs.FS) ([]string, error) {
+	page, err := fs.ReadFile(pages, "index.html")
+	if err != nil {
+		return nil, err
 	}
-	for name := range exported {
-		if len(name) > len("assets/") && name[:len("assets/")] == "assets/" {
-			available[name[len("assets/"):]] = "font"
+	css, err := fs.ReadFile(pages, "style.css")
+	if err != nil {
+		return nil, err
+	}
+	var all []string
+	for _, elements := range everyStartTag(string(page)) {
+		for _, attrs := range elements {
+			for _, key := range []string{"src", "href", "poster", "data-photo"} {
+				if value, ok := attrs[key]; ok {
+					all = append(all, value)
+				}
+			}
+			for _, candidate := range strings.Split(attrs["srcset"], ",") {
+				if fields := strings.Fields(candidate); len(fields) > 0 {
+					all = append(all, fields[0])
+				}
+			}
 		}
 	}
-	referenced := map[string]bool{}
+	for _, match := range cssURL.FindAllStringSubmatch(string(css), -1) {
+		all = append(all, match[1])
+	}
+	var local []string
+	for _, ref := range all {
+		if !strings.HasPrefix(ref, "https://") && !strings.HasPrefix(ref, "#") && !strings.HasPrefix(ref, "data:") &&
+			!strings.HasPrefix(ref, "mailto:") && !strings.HasPrefix(ref, "tel:") {
+			local = append(local, ref)
+		}
+	}
+	return local, nil
+}
+
+// referenceProblems lists every way the page's references and the published
+// set disagree: a reference that is not a content address, one naming nothing
+// published, one whose digest is not its file's own, a stray "assets/" that is
+// not a content address, and a stylesheet, script, font or media file that
+// nothing references.
+func referenceProblems(pages fs.FS, media []Object) []string {
+	digests := map[string]string{}
+	for _, object := range media {
+		digests["assets/"+object.Name] = object.SHA256
+	}
+	var problems []string
+	err := fs.WalkDir(pages, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || name == "index.html" {
+			return err
+		}
+		data, err := fs.ReadFile(pages, name)
+		sum := sha256.Sum256(data)
+		digests[name] = hex.EncodeToString(sum[:])
+		return err
+	})
+	refs, refErr := pageReferences(pages)
+	if err = errors.Join(err, refErr); err != nil {
+		return []string{err.Error()}
+	}
+	used := map[string]bool{}
+	for _, ref := range refs {
+		match := contentAddress.FindStringSubmatch(ref)
+		if match == nil {
+			problems = append(problems, ref+" is not a content address")
+			continue
+		}
+		name := match[1] + match[3]
+		used[name] = true
+		if want, published := digests[name]; !published {
+			problems = append(problems, ref+" names nothing published")
+		} else if want != match[2] {
+			problems = append(problems, ref+" carries a digest other than its file's")
+		}
+	}
 	for _, file := range []string{"index.html", "style.css", "app.js"} {
-		data, err := fs.ReadFile(Pages, file)
-		if err != nil {
+		data, _ := fs.ReadFile(pages, file)
+		for _, stray := range strayAsset.FindAllString(string(data), -1) {
+			if !contentAddress.MatchString(stray) {
+				problems = append(problems, file+" names "+stray+", which is not a content address")
+			}
+		}
+	}
+	for name := range digests {
+		if !used[name] {
+			problems = append(problems, name+" is published but never referenced")
+		}
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+// TestEveryReferenceIsTheContentAddressOfAPublishedFile proves the published
+// set is exactly what the page uses, each file named by its own digest.
+func TestEveryReferenceIsTheContentAddressOfAPublishedFile(t *testing.T) {
+	refs, err := pageReferences(Pages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) < len(Media)+len(exported)-1 {
+		t.Fatalf("read only %d references", len(refs))
+	}
+	for _, problem := range referenceProblems(Pages, Media) {
+		t.Error(problem)
+	}
+}
+
+// TestAReferenceFollowsTheBytesItNames proves the check is not decorative:
+// one changed byte in a file, a different pin, an unreferenced file or a
+// reference without its digest each leaves the page naming bytes nobody
+// publishes.
+func TestAReferenceFollowsTheBytesItNames(t *testing.T) {
+	copied := func() fstest.MapFS {
+		pages := fstest.MapFS{}
+		if err := fs.WalkDir(Pages, ".", func(name string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			data, err := fs.ReadFile(Pages, name)
+			pages[name] = &fstest.MapFile{Data: data}
+			return err
+		}); err != nil {
 			t.Fatal(err)
 		}
-		for _, match := range assetReference.FindAllSubmatch(data, -1) {
-			name := string(match[1])
-			if name == "" || name[len(name)-1] == '.' {
-				continue // the script's dynamic prefix "assets/" + key + ".webp"
-			}
-			referenced[name] = true
-		}
-		for _, match := range photoKey.FindAllSubmatch(data, -1) {
-			referenced[string(match[1])+".webp"] = true
-		}
+		return pages
 	}
-	var missing, orphaned []string
-	for name := range referenced {
-		if _, ok := available[name]; !ok {
-			missing = append(missing, name)
+	if problems := referenceProblems(copied(), Media); len(problems) != 0 {
+		t.Fatalf("the copy already disagrees: %v", problems)
+	}
+	edited := func(name, old, new string) fstest.MapFS {
+		pages := copied()
+		data := string(pages[name].Data)
+		if strings.Count(data, old) != 1 {
+			t.Fatalf("%s holds %q %d times", name, old, strings.Count(data, old))
 		}
+		pages[name] = &fstest.MapFile{Data: []byte(strings.Replace(data, old, new, 1))}
+		return pages
 	}
-	for name := range available {
-		if !referenced[name] {
-			orphaned = append(orphaned, name)
+	page := string(copied()["index.html"].Data)
+	stylesheet := regexp.MustCompile(`style\.[0-9a-f]{64}\.css`).FindString(page)
+	repinned := append([]Object(nil), Media...)
+	repinned[0].SHA256 = strings.Repeat("0", 64)
+	extra := append(append([]Object(nil), Media...), Object{Name: "unused.webp", SHA256: strings.Repeat("1", 64), Size: 1, ContentType: "image/webp"})
+	for name, c := range map[string]struct {
+		pages fstest.MapFS
+		media []Object
+	}{
+		"a stylesheet byte changed": {edited("style.css", "--green:#263f35", "--green:#263f36"), Media},
+		"a font byte changed": {func() fstest.MapFS {
+			p := copied()
+			p["assets/font-0.ttf"].Data = append(p["assets/font-0.ttf"].Data, 0)
+			return p
+		}(), Media},
+		"a media pin changed":        {copied(), repinned},
+		"a file nobody references":   {copied(), extra},
+		"a reference without digest": {edited("index.html", `href="`+stylesheet+`"`, `href="style.css"`), Media},
+		"a stray unversioned asset":  {edited("app.js", "dialog.showModal();", "dialog.showModal();void'assets/hero.webp';"), Media},
+	} {
+		if problems := referenceProblems(c.pages, c.media); len(problems) == 0 {
+			t.Errorf("%s: the reference check found nothing", name)
 		}
-	}
-	sort.Strings(missing)
-	sort.Strings(orphaned)
-	if len(missing) > 0 {
-		t.Errorf("referenced but not published: %v", missing)
-	}
-	if len(orphaned) > 0 {
-		t.Errorf("published but never referenced: %v", orphaned)
 	}
 }
 
@@ -269,10 +530,131 @@ func TestMediaPinsAreWellFormed(t *testing.T) {
 			t.Errorf("%s has a malformed pin", object.Name)
 		}
 	}
-	if len(Media) != 15 {
-		t.Errorf("the delivered page uses 15 media files, the table pins %d", len(Media))
+	delivered, derived := 0, 0
+	for _, object := range Media {
+		if match := derivedName.FindStringSubmatch(object.Name); match != nil {
+			derived++
+			if !names[match[1]+".webp"] {
+				t.Errorf("%s is derived from no pinned photograph", object.Name)
+			}
+			continue
+		}
+		delivered++
+	}
+	if delivered != 15 || derived != 15 {
+		t.Errorf("the page uses 15 delivered media files and 15 derived copies, the table pins %d and %d", delivered, derived)
 	}
 	if !names["don-lolo.mp4"] {
 		t.Error("the delivered film is not a pinned media file")
+	}
+}
+
+// TestTheScrollLockHasAFallback pins the lightbox's two scroll locks as two
+// rules. Joined in one selector list, an engine that cannot parse :has()
+// (Firefox before 121) would drop the whole rule, the class with it.
+func TestTheScrollLockHasAFallback(t *testing.T) {
+	data, err := fs.ReadFile(Pages, "style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(data)
+	for _, rule := range []string{"}body:has(dialog[open]){overflow:hidden}", "}body.lightbox-open{overflow:hidden}"} {
+		if strings.Count(css, rule) != 1 {
+			t.Errorf("style.css does not carry %s once, as a rule of its own", rule[1:])
+		}
+	}
+	if regexp.MustCompile(`body\.lightbox-open\s*,|,\s*body\.lightbox-open`).MatchString(css) {
+		t.Error("the class lock shares a selector list")
+	}
+}
+
+// derivedName is a smaller copy of a delivered photograph,
+// <photograph>-<width>.webp (docs/media-derivatives.md).
+var derivedName = regexp.MustCompile(`^([a-z0-9]+)-([1-9][0-9]*)\.webp$`)
+
+// TestImagesDeclareTheirSizes pins how the page loads its photographs without
+// changing how it shows them. Every image but the lightbox's (which takes the
+// size of whichever photograph it opens) states its width and height, and a
+// copy's stated width is the width in its name; the hero alone loads eagerly,
+// and offers its copies and its original through srcset with descriptors that
+// match; every other image is lazy and decodes off the main thread; and each
+// tile's button opens, in the lightbox, the delivered original of the very
+// photograph its tile shows.
+func TestImagesDeclareTheirSizes(t *testing.T) {
+	data, err := fs.ReadFile(Pages, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(data)
+	base := func(ref string) string { // assets/hero-1280.<sha256>.webp -> hero-1280
+		match := contentAddress.FindStringSubmatch(ref)
+		if match == nil {
+			t.Fatalf("%s is not a content address", ref)
+		}
+		return strings.TrimPrefix(match[1], "assets/")
+	}
+	images := startTags(page, "img")
+	if len(images) != 15 {
+		t.Fatalf("the page has %d images, want the hero, 12 tiles, the farm photograph and the lightbox", len(images))
+	}
+	for index, img := range images {
+		if img["src"] == "" {
+			if index != len(images)-1 || img["width"] != "" || img["height"] != "" {
+				t.Errorf("only the lightbox image, last on the page, may be empty and unsized: %v", img)
+			}
+			continue
+		}
+		name := base(img["src"])
+		for _, key := range []string{"width", "height"} {
+			if !regexp.MustCompile(`^[1-9][0-9]*$`).MatchString(img[key]) {
+				t.Errorf("%s states %s %q", name, key, img[key])
+			}
+		}
+		if match := derivedName.FindStringSubmatch(name + ".webp"); match != nil && img["width"] != match[2] {
+			t.Errorf("%s states width %s", name, img["width"])
+		}
+		if index == 0 {
+			if name != "hero" || img["loading"] != "" || img["decoding"] != "" {
+				t.Errorf("the first image must be the eagerly loaded hero: %v", img)
+			}
+			var widths []string
+			for _, candidate := range strings.Split(img["srcset"], ",") {
+				fields := strings.Fields(candidate)
+				if len(fields) != 2 {
+					t.Fatalf("hero srcset candidate %q", candidate)
+				}
+				width := img["width"] // the original's own width
+				if match := derivedName.FindStringSubmatch(base(fields[0]) + ".webp"); match != nil && match[1] == "hero" {
+					width = match[2]
+				} else if base(fields[0]) != "hero" {
+					t.Errorf("hero srcset offers %s", fields[0])
+				}
+				if fields[1] != width+"w" {
+					t.Errorf("hero srcset names %s at %s", fields[0], fields[1])
+				}
+				widths = append(widths, width)
+			}
+			if strings.Join(widths, ",") != "1280,1600,2000" || img["sizes"] != "(max-width: 1276px) 1276px, 100vw" {
+				t.Errorf("hero srcset %q sizes %q", img["srcset"], img["sizes"])
+			}
+			continue
+		}
+		if img["loading"] != "lazy" || img["decoding"] != "async" {
+			t.Errorf("%s below the fold loads %q and decodes %q", name, img["loading"], img["decoding"])
+		}
+	}
+	buttons := regexp.MustCompile(`<button class="photo" data-photo="([^"]+)"[^>]*><img [^>]*src="([^"]+)"`).FindAllStringSubmatch(page, -1)
+	if len(buttons) != 12 {
+		t.Fatalf("found %d photo buttons, want 12", len(buttons))
+	}
+	for _, button := range buttons {
+		full, tile := base(button[1]), base(button[2])
+		if derivedName.MatchString(full+".webp") || tile != full+"-806" {
+			t.Errorf("the tile showing %s opens %s in the lightbox", tile, full)
+		}
+	}
+	poster := startTags(page, "video")
+	if len(poster) != 1 || base(poster[0]["poster"]) != "aerial-1440" {
+		t.Errorf("the film's poster is %v", poster)
 	}
 }

@@ -14,6 +14,11 @@ on:
   workflow_run:
     workflows: [PR gate]
     types: [completed]
+    # Only a completed run on main can release, so only one starts this
+    # workflow: without the filter every pull request's gate run started a
+    # run here that its first job then skipped. The job's own conditions
+    # below stay the guard; the filter only stops the empty runs.
+    branches: [main]
 
 permissions: {}
 
@@ -42,7 +47,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Classify the completed range from its authorized gate verdict
-        # A documentation-only merge changes no artifact, so there is nothing
+        # A no-artifact merge changes no shipped byte, so there is nothing
         # to version, sign, scan, or release. The gate that validated the
         # exact pushed range published its verdict as a run artifact on the
         # run this event names. This step re-derives the class from git
@@ -125,7 +130,7 @@ jobs:
               # for requirement 10. So anchor on a base the verdict cannot
               # choose: the head of the newest EARLIER successful protected-
               # main gate run, straight from the Actions record. A
-              # documentation-only push changes no release lock, so all four
+              # no-artifact push changes no release lock, so all four
               # locks must be byte-identical between that head and this one.
               # A forged base cannot move this anchor.
               previous_json="${RUNNER_TEMP}/previous-main-runs.json"
@@ -149,7 +154,7 @@ jobs:
               git merge-base --is-ancestor "${previous_head}" "${COMPLETED_SHA}"
               for lock in VERSION chart/Chart.yaml chart/values.yaml CHANGELOG.md; do
                 if ! git diff --quiet "${previous_head}" "${COMPLETED_SHA}" -- "${lock}"; then
-                  printf 'DENY: %s changed since the last gated main head %s; this is not a documentation-only push\n' \
+                  printf 'DENY: %s changed since the last gated main head %s; this is not a no-artifact push\n' \
                     "${lock}" "${previous_head}" >&2
                   exit 1
                 fi
@@ -247,9 +252,9 @@ jobs:
                 --first-parent)"
               test "$(jq -er '.class' <<<"${cumulative}")" = no-artifact
               test "$(jq -er '.tag' <<<"${cumulative}")" = "${retained_tag}"
-              printf 'NO-ARTIFACT: %s is documentation-only; no tag, no Release, publisher not dispatched.\n' \
+              printf 'NO-ARTIFACT: %s changes no shipped byte; no tag, no Release, publisher not dispatched.\n' \
                 "${COMPLETED_SHA}"
-              printf '## No-artifact merge\n\nCommit %s changed documentation surfaces only; the retained version stays %s (tag and Release integrity are proven by the scheduled release audit) and the publisher was not dispatched.\n' \
+              printf '## No-artifact merge\n\nCommit %s changed no-artifact surfaces only (documentation, CI configuration, Go tests); the retained version stays %s (tag and Release integrity are proven by the scheduled release audit) and the publisher was not dispatched.\n' \
                 "${COMPLETED_SHA}" "${retained_tag}" >> "${GITHUB_STEP_SUMMARY}"
               ;;
             *)

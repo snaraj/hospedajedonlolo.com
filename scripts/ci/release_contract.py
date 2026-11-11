@@ -734,22 +734,50 @@ def _validated_history_transitions(
 
 DOCUMENTATION_FILES = frozenset({"AGENTS.md", "README.md", ".gitignore"})
 DOCUMENTATION_TREE = "docs/"
+# Paths no shipped byte can come from (issue #16, item F). What ships is the
+# image and the chart, and here is the whole of what reaches them:
+#   - The image holds one file, the Go binary. .dockerignore admits only
+#     go.mod, cmd/, internal/ and site/ into the build context, so .github/
+#     and scripts/ci/ are not even in it.
+#   - The chart is chart/ alone: the publisher packages that directory after
+#     writing the released digest into its copy of values.yaml.
+#   - .github/ and scripts/ci/ decide how the NEXT release is built, scanned
+#     and signed. A range confined to them publishes nothing, so no released
+#     byte moves.
+#   - A Go _test.go file is never compiled into the binary, and site/embed.go
+#     embeds an explicit list with no _test.go in it. The battery runs in the
+#     Dockerfile's backend-test stage, which the stage that compiles the
+#     binary never builds FROM: that stage copies only the battery's empty
+#     pass mark, so nothing a test writes can reach the binary. The Dockerfile
+#     test in test_release_contract.py pins that shape; without it this
+#     allowance would be false, because a test running beside `go build` can
+#     rewrite the tree it compiles.
+# The Dockerfile, .dockerignore, go.mod, chart/, every non-test source under
+# cmd/, internal/ and site/, and every base-image digest stay artifact
+# surfaces.
+NO_ARTIFACT_TREES = (".github/", "scripts/ci/")
+GO_SOURCE_TREES = ("cmd/", "internal/", "site/")
 RELEASE_LOCK_PATHS = ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
 _DOCUMENTATION_DIFF_MODES = frozenset({"000000", "100644", "100755"})
 _DOCUMENTATION_DIFF_STATUSES = frozenset({"A", "D", "M"})
 
 
 def is_documentation_path(path: str) -> bool:
-    """Classify one repo-relative path as documentation-only surface.
+    """Classify one repo-relative path as a no-artifact surface.
 
     The allowlist is deliberately closed: root AGENTS.md, README.md, and
-    .gitignore, plus Markdown files under docs/. Everything else — release
-    locks, scripts, workflows, application and chart trees, LICENSE — is an
-    artifact surface, so widening this set is itself a released gate change.
+    .gitignore, Markdown files under docs/, and the paths no shipped byte can
+    come from (NO_ARTIFACT_TREES, and Go test files under GO_SOURCE_TREES).
+    Everything else — release locks, the Dockerfile, .dockerignore, go.mod,
+    application sources, the chart, LICENSE — is an artifact surface.
     """
     if path in DOCUMENTATION_FILES:
         return True
-    return path.startswith(DOCUMENTATION_TREE) and path.endswith(".md")
+    if path.startswith(DOCUMENTATION_TREE) and path.endswith(".md"):
+        return True
+    if path.startswith(NO_ARTIFACT_TREES) and not path.endswith("/"):
+        return True
+    return path.startswith(GO_SOURCE_TREES) and path.endswith("_test.go")
 
 
 def _diff_entries(repository: Path, base: str, commit: str) -> list[tuple[str, str, str, str]]:
@@ -801,11 +829,11 @@ def _undocumented_paths(repository: Path, base: str, commit: str) -> list[str]:
 def classify_transition(repository: Path, base_sha: str, head_sha: str, *, first_parent: bool) -> dict[str, object]:
     """Classify one protected range as artifact or no-artifact, fail closed.
 
-    Any path anywhere in the range outside the documentation allowlist puts
+    Any path anywhere in the range outside the no-artifact allowlist puts
     the whole range under the unchanged one-exact-patch release contract via
     ``validate_transition`` — including its exhaustive mainline-history
     cross-check. Only a range whose every commit is individually confined to
-    documentation surfaces — so the artifact cannot have changed — classifies
+    no-artifact surfaces — so the artifact cannot have changed — classifies
     as no-artifact, and even then the range must cross no patch boundary,
     every release lock must be byte-identical from base to head, and the
     retained head snapshot must still validate. There is no flag, environment
@@ -840,12 +868,12 @@ def classify_transition(repository: Path, base_sha: str, head_sha: str, *, first
     boundaries = _monotonic_transitions(repository, base_sha, commits)
     if boundaries:
         raise ContractError(
-            "documentation-only range must contain exactly 0 one-patch "
+            "no-artifact range must contain exactly 0 one-patch "
             f"boundaries; found {len(boundaries)}"
         )
     for path in RELEASE_LOCK_PATHS:
         if _git_file(repository, base_sha, path) != _git_file(repository, head_sha, path):
-            raise ContractError(f"documentation-only range mutated release lock {path}")
+            raise ContractError(f"no-artifact range mutated release lock {path}")
     head_files = {
         path: _git_file(repository, head_sha, path) for path in RELEASE_LOCK_PATHS
     }

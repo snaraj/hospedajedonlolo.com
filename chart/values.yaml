@@ -5,7 +5,7 @@ replicaCount: 2
 deploymentReady: false
 image:
   repository: ghcr.io/snaraj/hospedajedonlolo-com
-  tag: v0.1.6
+  tag: v0.1.7
   # Replaced in the publisher's runner copy just before `helm package`; the
   # all-zero sentinel never leaves this repository in a published chart.
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -29,9 +29,9 @@ media:
 resources:
   requests:
     cpu: 25m
-    # Verified media is held in memory: the photographs now, and the film too
-    # once it is delivered (about 26 MiB in all). The request covers that plus
-    # the runtime rather than understating use.
+    # Verified media is held in memory: the photographs, their smaller copies
+    # and the film (about 28 MiB in all). The request covers that plus the
+    # runtime rather than understating use.
     memory: 64Mi
   limits:
     cpu: 200m

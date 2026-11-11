@@ -25,8 +25,9 @@ var errUnsafeMediaPath = errors.New("unsafe media path")
 // content-addressed layout naranjo.online's gallery uses), and every response
 // is served from the bytes that were hashed. The volume is closed after
 // startup, so nothing later written, replaced or removed there can change or
-// withdraw what a visitor receives. Fifteen files of about 26 MiB in all fit
-// the Pod's memory limit with room to spare.
+// withdraw what a visitor receives. Thirty files of about 28 MiB in all (the
+// delivered fifteen and their fifteen smaller copies) fit the Pod's memory
+// limit with room to spare.
 type mediaStore struct {
 	objects map[string]verifiedObject
 	slots   chan struct{}
@@ -119,7 +120,7 @@ func objectPath(object site.Object) string {
 // serve streams one verified object with Range support. A bounded number of
 // transfers run at once; beyond that the Pod answers 503 rather than queue
 // visitors behind a slow download.
-func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object verifiedObject) {
+func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object verifiedObject, cacheControl string) {
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
@@ -131,7 +132,7 @@ func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object verifi
 	}
 	etag := `"` + object.SHA256 + `"`
 	header := w.Header()
-	header.Set("Cache-Control", assetCacheControl)
+	header.Set("Cache-Control", cacheControl)
 	header.Set("Content-Security-Policy", mediaContentSecurityPolicy)
 	header.Set("Content-Type", object.ContentType)
 	header.Set("ETag", etag)
