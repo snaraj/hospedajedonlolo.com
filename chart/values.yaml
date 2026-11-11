@@ -5,7 +5,7 @@ replicaCount: 2
 deploymentReady: false
 image:
   repository: ghcr.io/snaraj/hospedajedonlolo-com
-  tag: v0.1.6
+  tag: v0.1.7
   # Replaced in the publisher's runner copy just before `helm package`; the
   # all-zero sentinel never leaves this repository in a published chart.
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

@@ -7,6 +7,47 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-10
+
+### Fixed
+
+- Opening the area map no longer tells Google which page the visitor came
+  from: the map frame sends no referrer, like every other request the page
+  makes (#16).
+- In Firefox before version 121 the page no longer scrolls behind an open
+  photograph, and in Safari before version 15.4 "Ask by email" opens an email
+  instead of WhatsApp. Current browsers behave exactly as before.
+
+### Changed
+
+- The page looks and reads exactly as before but loads about half as much on
+  a first visit. The room and gallery tiles show smaller copies of their
+  photographs, at twice the size they are drawn; the large photograph at the
+  top offers 1280- and 1600-pixel copies to screens that do not need all of
+  its 2000 pixels; and the film's poster is a lighter copy. Tapping a photograph
+  still opens the full original. Measured locally in Chromium, a first visit
+  at 390 pixels wide fell from 4.41 MB to 1.79 MB (2.04 MB on a 3x phone
+  screen, which still gets the full top photograph), and at 1440 pixels from
+  6.27 MB to 2.91 MB.
+- After a release, a visitor can no longer see the new page with an older
+  stylesheet or script. Every file the page loads is now named by its content
+  (`name.<sha256>.ext`) and may be kept for a year, while the page itself is
+  still checked on every visit; an outdated name is refused rather than
+  answered with other bytes.
+- The fifteen smaller copies are new pinned media. They must be on the media
+  volume, staged as `docs/media-derivatives.md` describes, before this release
+  is promoted: the server refuses to start without them.
+- A change confined to workflows, CI scripts or Go tests no longer cuts a
+  release, since no byte of the image or chart can come from those paths. The
+  container build now runs the tests in a stage of their own that the shipped
+  binary is never built from, which is what makes that true; the binary is
+  byte-identical to the one the old build produced.
+- CodeQL moves to v4.39.3 and the signing tool installer to v4.1.3, carrying
+  Dependabot #14 and #15 under the signed release identity. The release audit's
+  action pins are checked against the publisher's instead of fixed values, tool
+  downloads retry before their checksums are verified, and the release
+  orchestrator no longer starts an empty run for every pull request.
+
 ## [0.1.6] - 2026-11-02
 
 ### Changed
