@@ -138,6 +138,56 @@ func TestTheMapWaitsForTheVisitor(t *testing.T) {
 	}
 }
 
+// everyStartTag returns every start tag on the page as its lowercase name and
+// attributes, read by startTags. It over-reads rather than under-reads: a
+// "<name" inside an attribute value counts too, so nothing a parser could
+// see as an element is missed.
+func everyStartTag(page string) map[string][]map[string]string {
+	tags := map[string][]map[string]string{}
+	for _, match := range regexp.MustCompile(`<([A-Za-z][A-Za-z0-9-]*)`).FindAllStringSubmatch(page, -1) {
+		name := strings.ToLower(match[1])
+		if _, done := tags[name]; !done {
+			tags[name] = startTags(page, name)
+		}
+	}
+	return tags
+}
+
+// TestNothingOnThePageWeakensItsReferrerPolicy holds the page to the promise
+// its Referrer-Policy header makes: no request it starts names the page. An
+// element's referrerpolicy attribute replaces the document's policy for the
+// request that element makes (the map frame's no-referrer-when-downgrade sent
+// Google the page address), a <meta name="referrer"> replaces it for the whole
+// page, and a script can set either; so the only value admitted is the
+// header's own, no such meta exists, and the script never touches a referrer.
+func TestNothingOnThePageWeakensItsReferrerPolicy(t *testing.T) {
+	data, err := fs.ReadFile(Pages, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := everyStartTag(string(data))
+	if len(tags["iframe"]) != 1 || len(tags["img"]) == 0 || len(tags["a"]) == 0 {
+		t.Fatalf("the page was not read: %d frames, %d images, %d links", len(tags["iframe"]), len(tags["img"]), len(tags["a"]))
+	}
+	for name, elements := range tags {
+		for _, attrs := range elements {
+			if value, set := attrs["referrerpolicy"]; set && strings.ToLower(strings.TrimSpace(value)) != "no-referrer" {
+				t.Errorf("a <%s> asks for referrer policy %q, weaker than the page's no-referrer", name, value)
+			}
+			if name == "meta" && (strings.EqualFold(strings.TrimSpace(attrs["name"]), "referrer") || strings.EqualFold(strings.TrimSpace(attrs["http-equiv"]), "referrer-policy")) {
+				t.Errorf("a <meta> sets the referrer policy to %q", attrs["content"])
+			}
+		}
+	}
+	script, err := fs.ReadFile(Pages, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(script)), "referrer") {
+		t.Error("the script touches a referrer policy")
+	}
+}
+
 // exported pins every embedded file to the bytes the owner delivered on
 // 2026-10-31 (CHECKSUMS.sha256 of the export, source commit c39ac49d). This is
 // the "content does not change" invariant made executable: an edit to the
@@ -155,8 +205,13 @@ func TestTheMapWaitsForTheVisitor(t *testing.T) {
 //     delivered script, and TestTheMapWaitsForTheVisitor pins the behaviour.
 //   - network-error reports (issue #10): the edge stopped requesting them,
 //     so the privacy notice drops that clause in Spanish and in English.
+//
+// Release 0.1.7 (issue #16) changes delivery, never what the page shows or
+// says:
+//   - the map frame's referrerpolicy is no-referrer, the page's own policy,
+//     pinned by TestNothingOnThePageWeakensItsReferrerPolicy.
 var exported = map[string]string{
-	"index.html":                    "147ab8a67ba6f83fa06b829f52a82785041651ae30b0a3b3c344321f6d03ead9",
+	"index.html":                    "bdf7fb953d471e2222e8fc4d1dae2a4cf566a7b55d4bfef55ff57d39d7421a33",
 	"style.css":                     "39327b42d74deff549819cbb1b7b1a16127af337b156452b9f1026b1db034df7",
 	"app.js":                        "967388cb5a6afb2ed568db7cad15f6dbbe44437c923b3db30d1ad5e1aef0b41f",
 	"assets/font-0.ttf":             "b0ae3e89a7d3ef2b1838bb4b1ceb0b17cc3435af061eee809d76aa623ff116e9",
