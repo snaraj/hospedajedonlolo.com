@@ -35,9 +35,12 @@ booking form that hands the visitor's message to WhatsApp or to their own
 mail client. It is a single dependency-free Go binary — `cmd/server` over
 `internal/server` — that embeds the page, its stylesheet, its script and its
 six fonts from `site/` byte for byte (the script adds only the
-owner-requested language default), and serves fourteen photographs and one
-film from a read-only volume, each pinned by name, size and SHA-256 in
-`site/media.go`. It ships as a distroless multi-arch container plus a Helm
+owner-requested language default), and serves fourteen photographs, fifteen
+smaller copies made from them (`docs/media-derivatives.md`) and one film from
+a read-only volume, each pinned by name, size and SHA-256 in `site/media.go`.
+The page names every file it loads by its content address,
+`<name>.<sha256>.<ext>`, served immutable only while the digest is the file's
+own. It ships as a distroless multi-arch container plus a Helm
 chart and is deployed by digest onto a self-hosted Kubernetes platform. The
 origin speaks standard HTTP (RFC 9110/9111) only and is provider-neutral per
 the deployment-provider contract below. There is no frontend build: the files
@@ -858,9 +861,11 @@ pinned rather than described:
   fonts to the SHA-256 of the delivered export. No refactor, formatter, lint
   fix or "small copy edit" may change them; a content change is a reviewed
   change to that table in the same commit as the new bytes.
-- `site/media.go` pins the fourteen photographs and the film by name, size
-  and SHA-256. A new or replaced photograph is a reviewed change to that
-  table plus the new file staged on the volume with
+- `site/media.go` pins the fourteen photographs, their fifteen smaller
+  copies and the film by name, size and SHA-256. A new or replaced
+  photograph is a reviewed change to that table (and to its copies, remade
+  with the commands in `docs/media-derivatives.md`) plus the new files staged
+  on the volume with
   `scripts/stage-media.sh`; the server refuses to start until the volume
   matches the table exactly.
 - `compliance.json` moves with the content whenever a change adds a third

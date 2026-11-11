@@ -265,10 +265,16 @@ func TestNothingOnThePageWeakensItsReferrerPolicy(t *testing.T) {
 //     film, the stylesheet's fonts, and the lightbox's photographs, which
 //     app.js now reads whole from data-photo (scriptEdits).
 //     TestEveryReferenceIsTheContentAddressOfAPublishedFile holds every
-//     address to the bytes it names.
+//     address to the bytes it names;
+//   - the tiles show smaller copies of their photographs, the hero offers
+//     two through srcset, the film's poster is a lighter copy, and the
+//     images below the fold decode asynchronously; every image but the
+//     lightbox's states its size, and the farm photograph's rule gains
+//     height:auto so its stated height cannot override its aspect ratio.
+//     TestImagesDeclareTheirSizes pins it.
 var exported = map[string]string{
-	"index.html":                    "8287861c68f3a0f69f28c5f7d4d0ca705abdebeb1a0eceef073aa6f79f74d4f1",
-	"style.css":                     "8fb8e798a2d37acc4a2fc21613ecb0b9daefabaaf442d0e8914fc0b71309f67b",
+	"index.html":                    "d2b593dcb9a27fa8d8832630962e082cb0b58156debee6b4c152c0c953e511c0",
+	"style.css":                     "29202d36289976d214eb2b48930288ff63a8b2c3eaaa366d00f9defa7eaccbc3",
 	"app.js":                        "0ce5218a46024d67ee41872c9c817ffb2df5dcbf504409829890a79e57016216",
 	"assets/font-0.ttf":             "b0ae3e89a7d3ef2b1838bb4b1ceb0b17cc3435af061eee809d76aa623ff116e9",
 	"assets/font-1.ttf":             "376427b5322148d8de1e03f263bcca4935a2d60ba71d9f94f4947ab664c711ae",
@@ -506,10 +512,112 @@ func TestMediaPinsAreWellFormed(t *testing.T) {
 			t.Errorf("%s has a malformed pin", object.Name)
 		}
 	}
-	if len(Media) != 15 {
-		t.Errorf("the delivered page uses 15 media files, the table pins %d", len(Media))
+	delivered, derived := 0, 0
+	for _, object := range Media {
+		if match := derivedName.FindStringSubmatch(object.Name); match != nil {
+			derived++
+			if !names[match[1]+".webp"] {
+				t.Errorf("%s is derived from no pinned photograph", object.Name)
+			}
+			continue
+		}
+		delivered++
+	}
+	if delivered != 15 || derived != 15 {
+		t.Errorf("the page uses 15 delivered media files and 15 derived copies, the table pins %d and %d", delivered, derived)
 	}
 	if !names["don-lolo.mp4"] {
 		t.Error("the delivered film is not a pinned media file")
+	}
+}
+
+// derivedName is a smaller copy of a delivered photograph,
+// <photograph>-<width>.webp (docs/media-derivatives.md).
+var derivedName = regexp.MustCompile(`^([a-z0-9]+)-([1-9][0-9]*)\.webp$`)
+
+// TestImagesDeclareTheirSizes pins how the page loads its photographs without
+// changing how it shows them. Every image but the lightbox's (which takes the
+// size of whichever photograph it opens) states its width and height, and a
+// copy's stated width is the width in its name; the hero alone loads eagerly,
+// and offers its copies and its original through srcset with descriptors that
+// match; every other image is lazy and decodes off the main thread; and each
+// tile's button opens, in the lightbox, the delivered original of the very
+// photograph its tile shows.
+func TestImagesDeclareTheirSizes(t *testing.T) {
+	data, err := fs.ReadFile(Pages, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(data)
+	base := func(ref string) string { // assets/hero-1280.<sha256>.webp -> hero-1280
+		match := contentAddress.FindStringSubmatch(ref)
+		if match == nil {
+			t.Fatalf("%s is not a content address", ref)
+		}
+		return strings.TrimPrefix(match[1], "assets/")
+	}
+	images := startTags(page, "img")
+	if len(images) != 15 {
+		t.Fatalf("the page has %d images, want the hero, 12 tiles, the farm photograph and the lightbox", len(images))
+	}
+	for index, img := range images {
+		if img["src"] == "" {
+			if index != len(images)-1 || img["width"] != "" || img["height"] != "" {
+				t.Errorf("only the lightbox image, last on the page, may be empty and unsized: %v", img)
+			}
+			continue
+		}
+		name := base(img["src"])
+		for _, key := range []string{"width", "height"} {
+			if !regexp.MustCompile(`^[1-9][0-9]*$`).MatchString(img[key]) {
+				t.Errorf("%s states %s %q", name, key, img[key])
+			}
+		}
+		if match := derivedName.FindStringSubmatch(name + ".webp"); match != nil && img["width"] != match[2] {
+			t.Errorf("%s states width %s", name, img["width"])
+		}
+		if index == 0 {
+			if name != "hero" || img["loading"] != "" || img["decoding"] != "" {
+				t.Errorf("the first image must be the eagerly loaded hero: %v", img)
+			}
+			var widths []string
+			for _, candidate := range strings.Split(img["srcset"], ",") {
+				fields := strings.Fields(candidate)
+				if len(fields) != 2 {
+					t.Fatalf("hero srcset candidate %q", candidate)
+				}
+				width := img["width"] // the original's own width
+				if match := derivedName.FindStringSubmatch(base(fields[0]) + ".webp"); match != nil && match[1] == "hero" {
+					width = match[2]
+				} else if base(fields[0]) != "hero" {
+					t.Errorf("hero srcset offers %s", fields[0])
+				}
+				if fields[1] != width+"w" {
+					t.Errorf("hero srcset names %s at %s", fields[0], fields[1])
+				}
+				widths = append(widths, width)
+			}
+			if strings.Join(widths, ",") != "1280,1600,2000" || img["sizes"] != "(max-width: 1276px) 1276px, 100vw" {
+				t.Errorf("hero srcset %q sizes %q", img["srcset"], img["sizes"])
+			}
+			continue
+		}
+		if img["loading"] != "lazy" || img["decoding"] != "async" {
+			t.Errorf("%s below the fold loads %q and decodes %q", name, img["loading"], img["decoding"])
+		}
+	}
+	buttons := regexp.MustCompile(`<button class="photo" data-photo="([^"]+)"[^>]*><img [^>]*src="([^"]+)"`).FindAllStringSubmatch(page, -1)
+	if len(buttons) != 12 {
+		t.Fatalf("found %d photo buttons, want 12", len(buttons))
+	}
+	for _, button := range buttons {
+		full, tile := base(button[1]), base(button[2])
+		if derivedName.MatchString(full+".webp") || tile != full+"-806" {
+			t.Errorf("the tile showing %s opens %s in the lightbox", tile, full)
+		}
+	}
+	poster := startTags(page, "video")
+	if len(poster) != 1 || base(poster[0]["poster"]) != "aerial-1440" {
+		t.Errorf("the film's poster is %v", poster)
 	}
 }

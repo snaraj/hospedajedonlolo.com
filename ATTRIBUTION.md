@@ -21,7 +21,8 @@ The files are served exactly as delivered and are not modified here.
 
 ## Page content, photographs and film
 
-The page's text, the fourteen photographs and the film are the business's own
+The page's text, the fourteen photographs (and the smaller copies made from
+them) and the film are the business's own
 content, published by Hospedaje Don Lolo. They are not licensed under this
 repository's MIT licence, which covers the code only.
 

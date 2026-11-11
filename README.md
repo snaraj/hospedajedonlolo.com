@@ -10,8 +10,11 @@ their own mail client.
 It is a single standard-library Go server. The page, its stylesheet, its
 script and its six fonts (`site/`) are embedded in the binary byte for byte,
 except two lines the owner asked for that pick the opening language;
-the fourteen photographs and the film live on a read-only volume and are
-served at `/assets/<name>`. Every one of those files is pinned by SHA-256 —
+the fourteen photographs, fifteen smaller copies made from them for the tiles,
+the hero and the film's poster (`docs/media-derivatives.md`), and the film live
+on a read-only volume and are served at `/assets/<name>`. The page names every
+file it loads by its content address, `<name>.<sha256>.<ext>`, which the
+server answers immutable only while the digest is the file's own. Every one of those files is pinned by SHA-256 —
 the embedded ones in `site/site_test.go`, the volume ones in `site/media.go` —
 and the server refuses to start if the volume does not match, then serves
 the verified bytes from memory, with Range support for the film. There is no
@@ -19,11 +22,12 @@ frontend build, no Node and no npm.
 
 ## Run it locally
 
-Requires Go 1.26 or newer. Stage the photographs and the film into the
-volume layout the server reads (`immutable/<sha256>/<name>`), then start it:
+Requires Go 1.26 or newer. Make the smaller copies from the photographs
+(`docs/media-derivatives.md`), stage all thirty files into the volume layout
+the server reads (`immutable/<sha256>/<name>`), then start it:
 
 ```bash
-scripts/stage-media.sh <directory-with-the-15-media-files> /tmp/donlolo-media
+scripts/stage-media.sh <directory-with-the-30-media-files> /tmp/donlolo-media
 MEDIA_ROOT=/tmp/donlolo-media MEDIA_MAX_CONCURRENT=8 go run ./cmd/server
 ```
 
