@@ -41,10 +41,16 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
+// hexDigest is the lowercase SHA-256 the page writes into a content-addressed
+// name.
+func hexDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func (f *fixture) write(t *testing.T, name, contentType string, data []byte) site.Object {
 	t.Helper()
-	sum := sha256.Sum256(data)
-	digest := hex.EncodeToString(sum[:])
+	digest := hexDigest(data)
 	dir := filepath.Join(f.root, "immutable", digest)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)

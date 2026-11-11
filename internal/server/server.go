@@ -48,7 +48,7 @@ type Site struct {
 
 type embeddedFile struct {
 	data         []byte
-	etag         string
+	digest       string
 	contentType  string
 	cacheControl string
 }
@@ -114,7 +114,7 @@ func loadPages(pages fs.FS) (map[string]embeddedFile, error) {
 		sum := sha256.Sum256(data)
 		files[name] = embeddedFile{
 			data:         data,
-			etag:         `"` + hex.EncodeToString(sum[:]) + `"`,
+			digest:       hex.EncodeToString(sum[:]),
 			contentType:  kind.contentType,
 			cacheControl: kind.cacheControl,
 		}
@@ -156,8 +156,21 @@ func (s *Site) route(w http.ResponseWriter, r *http.Request) {
 		requestPath = "/" + indexName
 	}
 	name := strings.TrimPrefix(requestPath, "/")
+	immutable := false
+	if published, digest, ok := contentAddressed(name); ok {
+		// The page names its files by digest. Only the file's own digest is
+		// served, and never for the page itself, which must stay revalidated;
+		// an old, unknown or foreign digest is a miss, never a fallback to the
+		// current bytes under a name that claims other ones.
+		if published == indexName || s.digestOf(published) != digest {
+			w.Header().Set("Cache-Control", missCacheControl)
+			http.NotFound(w, r)
+			return
+		}
+		name, immutable = published, true
+	}
 	if object, ok := s.media.lookup(name); ok {
-		s.media.serve(w, r, object)
+		s.media.serve(w, r, object, cachePolicy(immutable, assetCacheControl))
 		return
 	}
 	file, ok := s.files[name]
@@ -165,10 +178,39 @@ func (s *Site) route(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Cache-Control", file.cacheControl)
-	w.Header().Set("ETag", file.etag)
+	w.Header().Set("Cache-Control", cachePolicy(immutable, file.cacheControl))
+	w.Header().Set("ETag", `"`+file.digest+`"`)
 	w.Header().Set("Content-Type", file.contentType)
 	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(file.data))
+}
+
+// contentAddressed splits a name such as assets/hero.<sha256>.webp into the
+// published name it addresses, assets/hero.webp, and the digest it claims.
+// Published names carry no inner dot, so the split is unambiguous.
+func contentAddressed(name string) (published, digest string, ok bool) {
+	ext := path.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	dot := strings.LastIndexByte(stem, '.')
+	if dot < 0 || !sha256Hex.MatchString(stem[dot+1:]) {
+		return "", "", false
+	}
+	return stem[:dot] + ext, stem[dot+1:], true
+}
+
+// digestOf is the SHA-256 of a published file's verified bytes, or "" for a
+// name nothing is published under.
+func (s *Site) digestOf(name string) string {
+	if object, ok := s.media.lookup(name); ok {
+		return object.SHA256
+	}
+	return s.files[name].digest
+}
+
+func cachePolicy(immutable bool, otherwise string) string {
+	if immutable {
+		return immutableCacheControl
+	}
+	return otherwise
 }
 
 // cleanPath accepts only canonical absolute paths: no backslash, no NUL, no

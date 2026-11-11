@@ -119,7 +119,7 @@ func objectPath(object site.Object) string {
 // serve streams one verified object with Range support. A bounded number of
 // transfers run at once; beyond that the Pod answers 503 rather than queue
 // visitors behind a slow download.
-func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object verifiedObject) {
+func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object verifiedObject, cacheControl string) {
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
@@ -131,7 +131,7 @@ func (s *mediaStore) serve(w http.ResponseWriter, r *http.Request, object verifi
 	}
 	etag := `"` + object.SHA256 + `"`
 	header := w.Header()
-	header.Set("Cache-Control", assetCacheControl)
+	header.Set("Cache-Control", cacheControl)
 	header.Set("Content-Security-Policy", mediaContentSecurityPolicy)
 	header.Set("Content-Type", object.ContentType)
 	header.Set("ETag", etag)
