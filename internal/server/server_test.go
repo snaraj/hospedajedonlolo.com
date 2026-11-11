@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/snaraj/hospedajedonlolo.com/site"
 )
 
 // pinnedPolicy is the reviewed browser policy, repeated here so a change to
@@ -195,6 +198,48 @@ func TestContentAddressedNamesAreImmutableAndExact(t *testing.T) {
 		if w := do(t, h, http.MethodGet, target, nil); w.Code != http.StatusNotFound || w.Header().Get("Cache-Control") != "" {
 			t.Errorf("%s: %d cache %q, want the plain 404 of an unknown name", target, w.Code, w.Header().Get("Cache-Control"))
 		}
+	}
+}
+
+// TestThePagesOwnAddressesAreServedImmutable boots the real embedded page and
+// follows it: the stylesheet and script addresses in the HTML, then the font
+// addresses in that stylesheet, each answer 200 with the immutable policy,
+// and the same names under a stale digest are refused. Media addresses are
+// held to their pins by the site package's reference test, because the
+// volume here is a fixture.
+func TestThePagesOwnAddressesAreServedImmutable(t *testing.T) {
+	cfg := newFixture(t).config()
+	cfg.Pages = site.Pages
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h := s.Handler()
+	address := regexp.MustCompile(`(?:assets/)?[a-z0-9][a-z0-9-]*\.([0-9a-f]{64})\.(?:css|js|ttf)`)
+	pending := address.FindAllString(do(t, h, http.MethodGet, "/", nil).Body.String(), -1)
+	served := map[string]bool{}
+	for len(pending) > 0 {
+		target := pending[0]
+		pending = pending[1:]
+		if served[target] {
+			continue
+		}
+		served[target] = true
+		w := do(t, h, http.MethodGet, "/"+target, nil)
+		if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+			t.Fatalf("%s: %d cache %q", target, w.Code, w.Header().Get("Cache-Control"))
+		}
+		if strings.HasSuffix(target, ".css") {
+			pending = append(pending, address.FindAllString(w.Body.String(), -1)...)
+		}
+		stale := strings.Replace(target, address.FindStringSubmatch(target)[1], strings.Repeat("0", 64), 1)
+		if w := do(t, h, http.MethodGet, "/"+stale, nil); w.Code != http.StatusNotFound || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s: %d cache %q", stale, w.Code, w.Header().Get("Cache-Control"))
+		}
+	}
+	if len(served) != 8 { // the stylesheet, the script and six fonts
+		t.Fatalf("followed %d addresses, want 8: %v", len(served), served)
 	}
 }
 

@@ -3,11 +3,14 @@ package site
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io/fs"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // deliveredScript is app.js exactly as the owner delivered it on 2026-10-31.
@@ -28,27 +31,74 @@ const languageDefault = "// Open in the visitor's browser language: the first Sp
 const mapOnRequest = "// Load the area map only when the visitor asks for it (issue #2): Google is contacted after a click on \"Show the map\" or on a place, never on its own.\n" +
 	"const areaMap=document.getElementById('area-map'),showMap=document.getElementById('show-map');showMap.addEventListener('click',()=>{areaMap.src=areaMap.dataset.src;showMap.remove()});document.querySelectorAll('.map-select').forEach(button=>button.addEventListener('click',()=>showMap.remove()));\n"
 
+// scriptEdits are the reviewed changes made INSIDE delivered lines, each the
+// delivered text and the text that replaced it. Every one changes how the
+// script loads or degrades, never what the page shows or says.
+var scriptEdits = []struct{ delivered, shipped string }{
+	// Release 0.1.7 (issue #16): the lightbox opens the photograph's own
+	// content-addressed URL, which its button carries in data-photo, instead
+	// of building an unversioned one from a key.
+	{"dialog.querySelector('img').src='assets/'+button.dataset.photo+'.webp';", "dialog.querySelector('img').src=button.dataset.photo;"},
+}
+
 // TestScriptKeepsTheDeliveredLines proves the only changes to the delivered
-// script are the two owner-requested additions: the language default's two
+// script are the two owner-requested additions (the language default's two
 // lines directly after the toggle's handler, and the map's two lines at the
-// end. Dropping both gives back the delivered bytes exactly.
+// end) and the named scriptEdits. Dropping both additions and undoing every
+// edit gives back the delivered bytes exactly.
 func TestScriptKeepsTheDeliveredLines(t *testing.T) {
 	data, err := fs.ReadFile(Pages, "app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.SplitAfter(string(data), "\n")
+	if err := undoScriptChanges(string(data)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// undoScriptChanges is TestScriptKeepsTheDeliveredLines's check, separate so
+// its own test can feed it altered scripts.
+func undoScriptChanges(script string) error {
+	lines := strings.SplitAfter(script, "\n")
 	last := len(lines) - 1 // SplitAfter leaves an empty final element after the closing newline
 	if len(lines) < 10 || lines[last] != "" || !strings.HasPrefix(lines[4], "toggle.addEventListener('click'") ||
 		lines[5]+lines[6] != languageDefault {
-		t.Fatal("the language default is not exactly the two lines after the toggle's handler")
+		return errors.New("the language default is not exactly the two lines after the toggle's handler")
 	}
 	if lines[last-2]+lines[last-1] != mapOnRequest {
-		t.Fatal("the map-on-request block is not exactly the script's last two lines")
+		return errors.New("the map-on-request block is not exactly the script's last two lines")
 	}
 	delivered := strings.Join(lines[:5], "") + strings.Join(lines[7:last-2], "")
+	for _, edit := range scriptEdits {
+		if strings.Count(delivered, edit.shipped) != 1 {
+			return fmt.Errorf("the reviewed edit %q is not in the script exactly once", edit.shipped)
+		}
+		delivered = strings.Replace(delivered, edit.shipped, edit.delivered, 1)
+	}
 	if sum := sha256.Sum256([]byte(delivered)); hex.EncodeToString(sum[:]) != deliveredScript {
-		t.Fatal("app.js changed beyond the language default")
+		return errors.New("app.js changed beyond the language default, the map block and the reviewed edits")
+	}
+	return nil
+}
+
+func TestTheScriptCheckSeesEveryChange(t *testing.T) {
+	data, err := fs.ReadFile(Pages, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	for name, altered := range map[string]string{
+		"an edit undone":       strings.Replace(script, scriptEdits[0].shipped, scriptEdits[0].delivered, 1),
+		"an edit made twice":   strings.Replace(script, scriptEdits[0].shipped, scriptEdits[0].shipped+scriptEdits[0].shipped, 1),
+		"an unreviewed change": strings.Replace(script, "dialog.showModal();", "dialog.show();", 1),
+		"a line appended":      script + "void 0;\n",
+	} {
+		if altered == script {
+			t.Fatalf("%s: the alteration did not apply", name)
+		}
+		if undoScriptChanges(altered) == nil {
+			t.Errorf("%s passed the delivered-script check", name)
+		}
 	}
 }
 
@@ -209,11 +259,17 @@ func TestNothingOnThePageWeakensItsReferrerPolicy(t *testing.T) {
 // Release 0.1.7 (issue #16) changes delivery, never what the page shows or
 // says:
 //   - the map frame's referrerpolicy is no-referrer, the page's own policy,
-//     pinned by TestNothingOnThePageWeakensItsReferrerPolicy.
+//     pinned by TestNothingOnThePageWeakensItsReferrerPolicy;
+//   - every file the page loads is named by its content address,
+//     <stem>.<sha256>.<ext>: the page's stylesheet, script, photographs and
+//     film, the stylesheet's fonts, and the lightbox's photographs, which
+//     app.js now reads whole from data-photo (scriptEdits).
+//     TestEveryReferenceIsTheContentAddressOfAPublishedFile holds every
+//     address to the bytes it names.
 var exported = map[string]string{
-	"index.html":                    "bdf7fb953d471e2222e8fc4d1dae2a4cf566a7b55d4bfef55ff57d39d7421a33",
-	"style.css":                     "39327b42d74deff549819cbb1b7b1a16127af337b156452b9f1026b1db034df7",
-	"app.js":                        "967388cb5a6afb2ed568db7cad15f6dbbe44437c923b3db30d1ad5e1aef0b41f",
+	"index.html":                    "8287861c68f3a0f69f28c5f7d4d0ca705abdebeb1a0eceef073aa6f79f74d4f1",
+	"style.css":                     "8fb8e798a2d37acc4a2fc21613ecb0b9daefabaaf442d0e8914fc0b71309f67b",
+	"app.js":                        "0ce5218a46024d67ee41872c9c817ffb2df5dcbf504409829890a79e57016216",
 	"assets/font-0.ttf":             "b0ae3e89a7d3ef2b1838bb4b1ceb0b17cc3435af061eee809d76aa623ff116e9",
 	"assets/font-1.ttf":             "376427b5322148d8de1e03f263bcca4935a2d60ba71d9f94f4947ab664c711ae",
 	"assets/font-2.ttf":             "b79a2ea7a38f33fd96a282fadb9ce97626bb0724a44d21075859f0e50239993a",
@@ -255,60 +311,186 @@ func TestEmbeddedFilesAreTheDeliveredBytes(t *testing.T) {
 }
 
 var (
-	assetReference = regexp.MustCompile(`assets/([A-Za-z0-9._-]+)`)
-	photoKey       = regexp.MustCompile(`data-photo="([a-z0-9-]+)"`)
+	// contentAddress is how the page names every file it loads: the
+	// published name with the SHA-256 of its bytes before the extension. The
+	// origin answers it only while the digest is the file's own
+	// (internal/server), so the stylesheet, script, fonts and media may be
+	// cached for a year and a release still reaches every visitor through the
+	// page's own revalidation.
+	contentAddress = regexp.MustCompile(`^((?:assets/)?[a-z0-9][a-z0-9-]*)\.([0-9a-f]{64})(\.[a-z0-9]+)$`)
+	// strayAsset finds every "assets/..." in the three files, wherever it is,
+	// so a reference outside the attributes pageReferences reads cannot hide.
+	strayAsset = regexp.MustCompile(`assets/[^"'\s(),]*`)
+	cssURL     = regexp.MustCompile(`url\(\s*['"]?([^'")\s]+)`)
 )
 
-// TestEveryReferenceResolvesAndNothingIsOrphaned proves the published set is
-// exactly what the page uses: every `assets/...` reference in the HTML, CSS
-// and script — including the lightbox's `assets/<data-photo>.webp` built at
-// run time — names an embedded font or a pinned media object, and every
-// font and media object is referenced by something.
-func TestEveryReferenceResolvesAndNothingIsOrphaned(t *testing.T) {
-	available := map[string]string{}
-	for _, object := range Media {
-		available[object.Name] = "media"
+// pageReferences returns every same-origin URL the page and its stylesheet
+// load: src, href, poster, data-photo (the lightbox's full photograph) and
+// each srcset candidate on every element, and every url() in the stylesheet.
+// Off-site addresses, in-page anchors and inline data are not loads from this
+// origin and are left out.
+func pageReferences(pages fs.FS) ([]string, error) {
+	page, err := fs.ReadFile(pages, "index.html")
+	if err != nil {
+		return nil, err
 	}
-	for name := range exported {
-		if len(name) > len("assets/") && name[:len("assets/")] == "assets/" {
-			available[name[len("assets/"):]] = "font"
+	css, err := fs.ReadFile(pages, "style.css")
+	if err != nil {
+		return nil, err
+	}
+	var all []string
+	for _, elements := range everyStartTag(string(page)) {
+		for _, attrs := range elements {
+			for _, key := range []string{"src", "href", "poster", "data-photo"} {
+				if value, ok := attrs[key]; ok {
+					all = append(all, value)
+				}
+			}
+			for _, candidate := range strings.Split(attrs["srcset"], ",") {
+				if fields := strings.Fields(candidate); len(fields) > 0 {
+					all = append(all, fields[0])
+				}
+			}
 		}
 	}
-	referenced := map[string]bool{}
+	for _, match := range cssURL.FindAllStringSubmatch(string(css), -1) {
+		all = append(all, match[1])
+	}
+	var local []string
+	for _, ref := range all {
+		if !strings.HasPrefix(ref, "https://") && !strings.HasPrefix(ref, "#") && !strings.HasPrefix(ref, "data:") &&
+			!strings.HasPrefix(ref, "mailto:") && !strings.HasPrefix(ref, "tel:") {
+			local = append(local, ref)
+		}
+	}
+	return local, nil
+}
+
+// referenceProblems lists every way the page's references and the published
+// set disagree: a reference that is not a content address, one naming nothing
+// published, one whose digest is not its file's own, a stray "assets/" that is
+// not a content address, and a stylesheet, script, font or media file that
+// nothing references.
+func referenceProblems(pages fs.FS, media []Object) []string {
+	digests := map[string]string{}
+	for _, object := range media {
+		digests["assets/"+object.Name] = object.SHA256
+	}
+	var problems []string
+	err := fs.WalkDir(pages, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || name == "index.html" {
+			return err
+		}
+		data, err := fs.ReadFile(pages, name)
+		sum := sha256.Sum256(data)
+		digests[name] = hex.EncodeToString(sum[:])
+		return err
+	})
+	refs, refErr := pageReferences(pages)
+	if err = errors.Join(err, refErr); err != nil {
+		return []string{err.Error()}
+	}
+	used := map[string]bool{}
+	for _, ref := range refs {
+		match := contentAddress.FindStringSubmatch(ref)
+		if match == nil {
+			problems = append(problems, ref+" is not a content address")
+			continue
+		}
+		name := match[1] + match[3]
+		used[name] = true
+		if want, published := digests[name]; !published {
+			problems = append(problems, ref+" names nothing published")
+		} else if want != match[2] {
+			problems = append(problems, ref+" carries a digest other than its file's")
+		}
+	}
 	for _, file := range []string{"index.html", "style.css", "app.js"} {
-		data, err := fs.ReadFile(Pages, file)
-		if err != nil {
+		data, _ := fs.ReadFile(pages, file)
+		for _, stray := range strayAsset.FindAllString(string(data), -1) {
+			if !contentAddress.MatchString(stray) {
+				problems = append(problems, file+" names "+stray+", which is not a content address")
+			}
+		}
+	}
+	for name := range digests {
+		if !used[name] {
+			problems = append(problems, name+" is published but never referenced")
+		}
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+// TestEveryReferenceIsTheContentAddressOfAPublishedFile proves the published
+// set is exactly what the page uses, each file named by its own digest.
+func TestEveryReferenceIsTheContentAddressOfAPublishedFile(t *testing.T) {
+	refs, err := pageReferences(Pages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) < len(Media)+len(exported)-1 {
+		t.Fatalf("read only %d references", len(refs))
+	}
+	for _, problem := range referenceProblems(Pages, Media) {
+		t.Error(problem)
+	}
+}
+
+// TestAReferenceFollowsTheBytesItNames proves the check is not decorative:
+// one changed byte in a file, a different pin, an unreferenced file or a
+// reference without its digest each leaves the page naming bytes nobody
+// publishes.
+func TestAReferenceFollowsTheBytesItNames(t *testing.T) {
+	copied := func() fstest.MapFS {
+		pages := fstest.MapFS{}
+		if err := fs.WalkDir(Pages, ".", func(name string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			data, err := fs.ReadFile(Pages, name)
+			pages[name] = &fstest.MapFile{Data: data}
+			return err
+		}); err != nil {
 			t.Fatal(err)
 		}
-		for _, match := range assetReference.FindAllSubmatch(data, -1) {
-			name := string(match[1])
-			if name == "" || name[len(name)-1] == '.' {
-				continue // the script's dynamic prefix "assets/" + key + ".webp"
-			}
-			referenced[name] = true
-		}
-		for _, match := range photoKey.FindAllSubmatch(data, -1) {
-			referenced[string(match[1])+".webp"] = true
-		}
+		return pages
 	}
-	var missing, orphaned []string
-	for name := range referenced {
-		if _, ok := available[name]; !ok {
-			missing = append(missing, name)
+	if problems := referenceProblems(copied(), Media); len(problems) != 0 {
+		t.Fatalf("the copy already disagrees: %v", problems)
+	}
+	edited := func(name, old, new string) fstest.MapFS {
+		pages := copied()
+		data := string(pages[name].Data)
+		if strings.Count(data, old) != 1 {
+			t.Fatalf("%s holds %q %d times", name, old, strings.Count(data, old))
 		}
+		pages[name] = &fstest.MapFile{Data: []byte(strings.Replace(data, old, new, 1))}
+		return pages
 	}
-	for name := range available {
-		if !referenced[name] {
-			orphaned = append(orphaned, name)
+	page := string(copied()["index.html"].Data)
+	stylesheet := regexp.MustCompile(`style\.[0-9a-f]{64}\.css`).FindString(page)
+	repinned := append([]Object(nil), Media...)
+	repinned[0].SHA256 = strings.Repeat("0", 64)
+	extra := append(append([]Object(nil), Media...), Object{Name: "unused.webp", SHA256: strings.Repeat("1", 64), Size: 1, ContentType: "image/webp"})
+	for name, c := range map[string]struct {
+		pages fstest.MapFS
+		media []Object
+	}{
+		"a stylesheet byte changed": {edited("style.css", "--green:#263f35", "--green:#263f36"), Media},
+		"a font byte changed": {func() fstest.MapFS {
+			p := copied()
+			p["assets/font-0.ttf"].Data = append(p["assets/font-0.ttf"].Data, 0)
+			return p
+		}(), Media},
+		"a media pin changed":        {copied(), repinned},
+		"a file nobody references":   {copied(), extra},
+		"a reference without digest": {edited("index.html", `href="`+stylesheet+`"`, `href="style.css"`), Media},
+		"a stray unversioned asset":  {edited("app.js", "dialog.showModal();", "dialog.showModal();void'assets/hero.webp';"), Media},
+	} {
+		if problems := referenceProblems(c.pages, c.media); len(problems) == 0 {
+			t.Errorf("%s: the reference check found nothing", name)
 		}
-	}
-	sort.Strings(missing)
-	sort.Strings(orphaned)
-	if len(missing) > 0 {
-		t.Errorf("referenced but not published: %v", missing)
-	}
-	if len(orphaned) > 0 {
-		t.Errorf("published but never referenced: %v", orphaned)
 	}
 }
 
