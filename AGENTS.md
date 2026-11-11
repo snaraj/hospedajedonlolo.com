@@ -105,15 +105,17 @@ Numbered for citation, repo-scoped, none negotiable in code:
     exactly one patch from its current protected base: numeric `VERSION`,
     chart `version`, `appVersion`, and changelog `X.Y.Z`, plus plain `vX.Y.Z`
     image tag. A range whose every commit is individually confined to the
-    closed documentation allowlist — root `AGENTS.md`, `README.md`,
-    `.gitignore`, and Markdown files under `docs/` — classifies no-artifact:
+    closed no-artifact allowlist — root `AGENTS.md`, `README.md`,
+    `.gitignore`, Markdown files under `docs/`, and the paths no shipped byte
+    can come from: `.github/`, `scripts/ci/`, and Go `_test.go` files under
+    `cmd/`, `internal/` and `site/` — classifies no-artifact:
     it advances nothing, and the orchestrator proves that class against
     evidence the VERDICT CANNOT CHOOSE before skipping the publisher, then
     logs that verdict explicitly instead of dispatching. The anchor it proves
     against, the anchor-advance walk, and the gap re-classification are
     specified in `docs/release-classifier.md`, with the working attack that
     retired "it re-derives the class from git" as a sufficient answer.
-    Removing the release from a documentation-only merge
+    Removing the release from a no-artifact merge
     weakens nothing: the artifact is unchanged, so there is
     nothing to version, sign, scan, or attest. The classifier has exactly
     two verdicts and no flag, environment variable, or configuration input;
@@ -121,8 +123,9 @@ Numbered for citation, repo-scoped, none negotiable in code:
     its one exact patch, an unparseable diff entry, or a non-regular file
     mode all deny; renames decompose into add plus delete, so a rename
     crossing the allowlist boundary denies through its non-allowlisted side.
-    Widening the allowlist is itself an artifact-classified gate change that
-    releases. Two denial modes are deliberate and must not be mistaken for
+    `release_contract.py` states each path's proof; the Go test files hold
+    only while no shipped Dockerfile stage builds FROM the stage the test
+    battery ran in, which its contract test pins. Two denial modes are deliberate and must not be mistaken for
     bugs, and they behave differently — conflating them misleads whoever is
     on the other end of the red build. The BOUNDARY denial, from the
     recovered last release boundary, is STICKY: a documentation merge whose
@@ -249,7 +252,7 @@ capabilities. To run the origin locally, stage the media with
 Releases: every artifact-classified PR advances numeric `VERSION`, chart
 `version`, `appVersion`, and changelog `X.Y.Z`, plus plain `vX.Y.Z`
 `image.tag`, by exactly one patch from its current protected base; a
-documentation-only range (requirement 10's closed allowlist) advances nothing
+no-artifact range (requirement 10's closed allowlist) advances nothing
 and skips release orchestration entirely. Successful main CI creates NO tag: it
 explicitly dispatches the protected-main publisher with that successful run's
 ID, and the PUBLISHER creates the annotated plain `vX.Y.Z` tag at the exact
@@ -275,7 +278,7 @@ aliases, signer/provenance, and scan policy/results; a weekly read-only audit
 revalidates that complete chain. Histories and tags are append-only; stale
 concurrent PRs must resync
 and take the new next patch when they carry an artifact change; a
-documentation-only PR has no patch to retake. Deployment RESOLVES digests, never tags. The
+no-artifact PR has no patch to retake. Deployment RESOLVES digests, never tags. The
 Helm chart/OCI tag is the documented numeric `X.Y.Z` exception because Helm
 requires its registry tag to equal valid chart SemVer; Git/image/Release tags
 remain plain `vX.Y.Z`.
@@ -326,8 +329,7 @@ step assumes a particular AI tool, and no vendor gets a different protocol.
   merge.
 - **Normal code changes** take focused tests and one full local gate; a
   live check only when runtime behavior changes; one review.
-- **Docs, comments, and formatting** (requirement 10's no-artifact class)
-  run the relevant checks only; adversarial review is the coordinator's
+- **Docs, comments, and formatting** run the relevant checks only; adversarial review is the coordinator's
   routing decision, not a mandate.
 
 Exact-head discipline is unchanged for whatever review DOES run: a
@@ -501,7 +503,7 @@ merges. No third distinct-context pass is required.
 - **Merge readiness.** Draft remains Draft until every check is successful at
   the exact head, the base equals current protected `main`, all discussions and
   findings are resolved, a fresh exact-head APPROVE receipt exists, the next patch
-  still follows that base for an artifact-classified PR (a documentation-only
+  still follows that base for an artifact-classified PR (a no-artifact
   PR reserves no patch at all), the automatic release consequence is proven, the
   owner-observed release-control receipt proves strict exact required checks,
   the owner-verified commands prove immutable releases and the other settings
@@ -583,7 +585,7 @@ The complete delivery loop, each step gated by the sections around it:
    per branch, always —
    a branch that is not yours is a branch you never push to. Reserve the exact
    next patch from that base when the change touches any artifact surface; a
-   documentation-only change (requirement 10's closed allowlist) reserves no
+   no-artifact change (requirement 10's closed allowlist) reserves no
    patch and must leave every release lock untouched. If another PR lands, create a fresh branch from
    current main, carry the still-valid diff without rewriting published
    history, take the new next patch, and close/supersede the stale PR.
@@ -707,7 +709,7 @@ with unaddressed owner comments.
 
 Dependent work may be described as a merge order, but every eventual
 artifact-classified PR to protected main must independently carry its next
-patch release; a documentation-only PR carries none and is never a release
+patch release; a no-artifact PR carries none and is never a release
 dependency. Keep a
 dependent PR Draft until its predecessor lands. Then fetch current main, create
 a fresh branch without force/rebase, port only the residual diff, allocate the
@@ -787,7 +789,7 @@ repair its own protection, an inexact receipt is an intentional Ready blocker.
   `unittest discover -s scripts/ci`, the same command the local gate above
   lists — the Dependabot contract, the commit identity and co-author
   contract over the contributed range, the exact one-patch transition and
-  its published verdict, checksum-verified tool install, `trivy fs` and
+  its published verdict, checksum-verified tool install with retried downloads, `trivy fs` and
   `trivy config` at HIGH/CRITICAL, actionlint, `gitleaks git` over full
   history, `gitleaks dir`), `dependency-review` (PRs only; fails on high
   severity), `application` (toolchain pinned AND verified — Go 1.26.10;
@@ -806,7 +808,9 @@ repair its own protection, an inexact receipt is an intentional Ready blocker.
 - **codeql.yml** — pull requests, `main` pushes, weekly cron: `go`
   (manual build), `javascript-typescript` (it analyses `site/app.js`) and
   `python` (`scripts/ci`).
-- **release-after-main.yml** — success-only exact-SHA main-CI completion;
+- **release-after-main.yml** — success-only exact-SHA main-CI completion
+  (its `workflow_run` trigger admits main runs only, so a pull request's gate
+  run starts nothing here);
   performs no publication mutation and explicitly dispatches the publisher
   definition on protected `main` with the exact completed-run ID.
   It re-proves the gate's published transition class against an anchor the
@@ -890,8 +894,8 @@ pinned rather than described:
 
 - **CHANGELOG discipline.** Keep a Changelog format; every artifact-classified
   PR immediately follows an empty `[Unreleased]` heading with its exact
-  next-version and ISO date, matching every source lock; a documentation-only
-  PR leaves `CHANGELOG.md` untouched (the file sits outside the documentation
+  next-version and ISO date, matching every source lock; a no-artifact
+  PR leaves `CHANGELOG.md` untouched (the file sits outside the no-artifact
   allowlist precisely so a no-release range can never claim one). There is no
   later release PR. Released history below that new heading is APPEND-ONLY and
   the gate proves it: `release_contract.py` refuses a snapshot

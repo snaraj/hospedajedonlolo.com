@@ -4048,9 +4048,41 @@ class NoArtifactClassTests(SyntheticRepo, unittest.TestCase):
             ("LICENSE", False),
             ("chart/Chart.yaml", False),
             ("chart/values.yaml", False),
-            ("scripts/ci/release_contract.py", False),
-            (".github/workflows/pr-gate.yml", False),
-            (".github/dependabot.yml", False),
+            # Paths no shipped byte can come from (issue #16, item F):
+            # workflows, CI scripts and Go test files.
+            ("scripts/ci/release_contract.py", True),
+            ("scripts/ci/install-tools.sh", True),
+            (".github/workflows/pr-gate.yml", True),
+            (".github/dependabot.yml", True),
+            (".github/PULL_REQUEST_TEMPLATE.md", True),
+            ("cmd/server/main_test.go", True),
+            ("internal/server/server_test.go", True),
+            ("internal/server/deep/x_test.go", True),
+            ("site/site_test.go", True),
+            # Everything that reaches the image or the chart.
+            ("Dockerfile", False),
+            (".dockerignore", False),
+            ("go.mod", False),
+            ("go.sum", False),
+            ("cmd/server/main.go", False),
+            ("internal/server/server.go", False),
+            ("internal/server/testing.go", False),
+            ("internal/server/testdata/fixture.webp", False),
+            ("site/embed.go", False),
+            ("site/media.go", False),
+            ("site/index.html", False),
+            ("site/app.js", False),
+            ("site/assets/font-0.ttf", False),
+            ("chart/templates/deployment.yaml", False),
+            ("chart/values.schema.json", False),
+            ("scripts/stage-media.sh", False),
+            ("scripts/cix/a.py", False),
+            ("tools/x_test.go", False),
+            ("x_test.go", False),
+            ("cmd/server/main_test.go/x", False),
+            (".github", False),
+            (".githubx/a.yml", False),
+            ("scripts/ci/", False),
             ("docs/tool.py", False),
             ("docs/README", False),
             ("frontend/.gitignore", False),
@@ -4088,6 +4120,48 @@ class NoArtifactClassTests(SyntheticRepo, unittest.TestCase):
             self.assertEqual(verdict["class"], "no-artifact")
             self.assertEqual(verdict["commits"], 3)
             self.assertEqual(verdict["tag"], "v0.1.9")
+
+    def test_ci_and_test_only_ranges_classify_no_artifact(self):
+        # Issue #16, item F: an actions bump, a gate-script edit or a Go test
+        # change ships no byte, so it advances nothing and cuts no release.
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self.paths_commit(root, {".github/workflows/pr-gate.yml": "name: PR gate\n"}, "workflow")
+            self.paths_commit(root, {"scripts/ci/install-tools.sh": "#!/bin/sh\n"}, "ci script")
+            self.paths_commit(root, {"internal/server/server_test.go": "package server\n"}, "go test")
+            head = self.paths_commit(
+                root,
+                {"site/site_test.go": "package site\n", "cmd/server/main_test.go": "package main\n", "docs/guide.md": "guide\n"},
+                "more tests and docs",
+            )
+            verdict = RC.classify_transition(root, base, head, first_parent=True)
+            self.assertEqual(verdict["class"], "no-artifact")
+            self.assertEqual(verdict["commits"], 4)
+            self.assertEqual(verdict["tag"], "v0.1.9")
+
+    def test_build_inputs_without_release_patch_deny(self):
+        # Every file that reaches the image or the chart still needs its one
+        # exact patch, alone or beside a workflow change.
+        for path in (
+            "Dockerfile",
+            ".dockerignore",
+            "go.mod",
+            "cmd/server/main.go",
+            "internal/server/server.go",
+            "site/index.html",
+            "site/media.go",
+            "chart/values.yaml",
+            "chart/templates/deployment.yaml",
+        ):
+            for beside_workflow in (False, True):
+                with self.subTest(path=path, beside_workflow=beside_workflow), tempfile.TemporaryDirectory() as temporary:
+                    root, base = self.repo(temporary)
+                    if beside_workflow:
+                        self.paths_commit(root, {".github/workflows/pr-gate.yml": "name: PR gate\n"}, "workflow")
+                    head = self.paths_commit(root, {path: "changed\n"}, "build input")
+                    with self.assertRaises(RC.ContractError) as denied:
+                        RC.classify_transition(root, base, head, first_parent=True)
+                    self.assertIn(path, str(denied.exception))
 
     def test_mixed_range_without_release_patch_denies_naming_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -7523,8 +7597,12 @@ class GovernanceParityTests(unittest.TestCase):
                 # clause states `--include-dev-deps` over a dependency-free Go
                 # module instead of frontend development dependencies, which
                 # do not exist here. Its Ready sentences are unchanged.
+                # Re-pinned for issue #16: "documentation-only" becomes
+                # "no-artifact" twice, because requirement 10's class now also
+                # holds .github/, scripts/ci/ and Go test files. Those two
+                # words are the whole change; the Ready sentences are unchanged.
                 ("Releases: every artifact-classified PR advances numeric",
-                 "c689adbf5ee06961aaa17bbf098427ae253259177ed7f408ed61afe6d326ac22"),
+                 "4d1cf6b8a8b606991f7fdd7210499d86cf6a5d02c488524bf209497c392a05d5"),
                 ("**Verdict format** — posted as a normal PR comment",
                  "5b074e5bab48c010304cc700fc62e47d14e34769c7534255b0ed14451e09a1cd"),
                 ("A green check, a peer approval, or a ready state is evidence",
@@ -7546,8 +7624,11 @@ class GovernanceParityTests(unittest.TestCase):
                 # the settings job's read-only token cannot read that switch.
                 # The Ready rule is unchanged -- every listed proof is still
                 # required, and only the coordinator flips Ready.
+                # Re-pinned for issue #16: "a documentation-only PR reserves no
+                # patch" reads "a no-artifact PR", the class's new name. That
+                # one word is the whole change; the Ready rule is unchanged.
                 ("- **Merge readiness.** Draft remains Draft until",
-                 "414499674f87190c90f963d8ffccd1fcf521421f1ce5170ef64eda8a19676ed8"),
+                 "7c5f16d34d6b4fdd9c7958728ea524597993d7afcb4cc252f3dbc86cf897eddb"),
                 # Re-pinned for issue #285: step 2 of the list admits the
                 # `xhigh` effort to the branch grammar (owner ruling,
                 # 2026-09-03). The block's Ready sentences — step 1's "Never
@@ -7570,8 +7651,11 @@ class GovernanceParityTests(unittest.TestCase):
                 # example) and drops the sibling's branch examples; step 7
                 # names the owner-verified settings commands beside the bypass
                 # command. The Ready sentences are unchanged.
+                # Re-pinned for issue #16: step 2's "documentation-only change"
+                # reads "no-artifact change", the class's new name. That one
+                # word is the whole change; the Ready steps are unchanged.
                 ("1. **Claim the work.** (the delivery-loop numbered list)",
-                 "60d8c8cced15788e08eb0d0cf8ea6e3c47b7ef800515d195e81051073c93b5ca"),
+                 "ee53e01f8f846f1983e12e5f844ef4a6697be3b1bfcce1322340da5d0d066201"),
                 ("Comments the owner leaves on PRs ARE code reviews",
                  "e8e6f2dd0c82a28a8c280cd1705002f4faf8d2e9aa81195df5466d6db83a871c"),
                 ("The full local gate does not substitute for the server boundary",
@@ -8566,10 +8650,86 @@ class NoArtifactWiringTests(unittest.TestCase):
         self.assertIn('--base "${anchor}"', cumulative)
         self.assertIn("= no-artifact", cumulative)
 
+    @staticmethod
+    def require_tests_never_reach_the_shipped_stages(dockerfile: str) -> None:
+        """The classifier's Go-test allowance (release_contract.py, issue #16)
+        holds only while no stage that ships is built FROM the stage the test
+        battery ran in: the compile stage is reached by the battery's empty
+        pass mark alone, and the image takes exactly the binary."""
+        stages: dict[str, tuple[str, list[str]]] = {}
+        name = ""
+        # Continuation lines are joined first, so an instruction split over
+        # several lines is read whole; comments say nothing.
+        for line in re.sub(r"\\\n", " ", dockerfile).splitlines():
+            line = " ".join(line.split())
+            if not line or line.startswith("#"):
+                continue
+            found = re.fullmatch(r"FROM (?:--platform=\S+ )?(\S+)(?: AS (\S+))?", line)
+            if found:
+                name = found.group(2) or "final"
+                if name in stages:
+                    raise ValueError(f"the Dockerfile declares stage {name} twice")
+                stages[name] = (found.group(1), [])
+            elif not name:
+                raise ValueError(f"the Dockerfile has an instruction before its first FROM: {line}")
+            else:
+                stages[name][1].append(line)
+        batteries = {stage for stage, (_, body) in stages.items() if any(re.search(r"\bgo test\b", line) for line in body)}
+        if batteries != {"backend-test"}:
+            raise ValueError(f"the test battery runs in {sorted(batteries)}, not in backend-test alone")
+        for stage, (parent, _) in stages.items():
+            if parent == "backend-test":
+                raise ValueError(f"stage {stage} is built FROM the tested tree")
+        if stages["backend-test"][0] != "backend-source" or stages.get("backend", ("", []))[0] != "backend-source":
+            raise ValueError("the battery and the compile stage must both start from backend-source")
+        mentions = [line for stage in ("backend", "final") for line in stages.get(stage, ("", []))[1] if "backend-test" in line]
+        if mentions != ["COPY --from=backend-test /backend-tested /backend-tested"]:
+            raise ValueError(f"the shipped stages take {mentions} from the battery, not its pass mark alone")
+        shipped = [line for line in stages.get("final", ("", []))[1] if line.split(" ", 1)[0] in ("ADD", "COPY", "RUN")]
+        if shipped != ["COPY --from=backend --chown=65532:65532 /out/hospedajedonlolo-com /hospedajedonlolo-com"]:
+            raise ValueError(f"the final image no longer takes exactly the binary from the compile stage: {shipped}")
+
+    def test_tests_never_reach_the_shipped_stages(self):
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.require_tests_never_reach_the_shipped_stages(dockerfile)
+        for label, old, new in (
+            ("compile stage built from the tested tree", "FROM backend-source AS backend\n", "FROM backend-test AS backend\n"),
+            ("tests folded back into the compile", 'RUN GOOS="${TARGETOS}"', 'RUN go test ./... && GOOS="${TARGETOS}"'),
+            ("tests on a continuation line of the compile", "    go build -trimpath", "    go test ./... && go build -trimpath"),
+            ("the battery's tree copied in", "COPY --from=backend-test /backend-tested /backend-tested", "COPY --from=backend-test /src /src"),
+            ("the battery mounted into the compile", "ARG TARGETOS\n", "RUN --mount=type=bind,from=backend-test,target=/t true\nARG TARGETOS\n"),
+            ("the battery moved into the source stage", "COPY site/ site/\n", "COPY site/ site/\nRUN go test ./...\n"),
+            ("the image takes the battery's mark", "COPY --from=backend --chown=65532:65532", "COPY --from=backend-test /backend-tested /x\nCOPY --from=backend --chown=65532:65532"),
+            ("the image takes more than the binary", "USER 65532:65532\n", "COPY --from=backend /src /src\nUSER 65532:65532\n"),
+            ("the battery dropped", "RUN go test ./... && touch /backend-tested", "RUN touch /backend-tested"),
+            # The image's base swapped for the tested tree: its one COPY is
+            # unchanged, so only the FROM rule can see it.
+            (
+                "the image built FROM the tested tree",
+                "FROM gcr.io/distroless/static-debian13:nonroot@",
+                "FROM backend-test\n# was gcr.io/distroless/static-debian13:nonroot@",
+            ),
+        ):
+            self.assertEqual(dockerfile.count(old), 1, label)
+            with self.subTest(mutant=label), self.assertRaises(ValueError):
+                self.require_tests_never_reach_the_shipped_stages(dockerfile.replace(old, new))
+        # Instructions are read whole: the compile reflowed onto one line and
+        # the image's COPY split over two still pass, so the check follows
+        # what Docker runs, not how the file happens to wrap.
+        reflowed = dockerfile.replace('GOARCH="${TARGETARCH}" \\\n    go build', 'GOARCH="${TARGETARCH}" go build', 1).replace(
+            "COPY --from=backend --chown=65532:65532 /out/", "COPY --from=backend \\\n    --chown=65532:65532 /out/", 1
+        )
+        self.assertIn('GOARCH="${TARGETARCH}" go build', reflowed)
+        self.assertIn("COPY --from=backend \\\n    --chown", reflowed)
+        self.require_tests_never_reach_the_shipped_stages(reflowed)
+
     def test_agents_contract_names_the_exact_code_allowlist(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        for name in sorted(RC.DOCUMENTATION_FILES):
+        for name in sorted(RC.DOCUMENTATION_FILES) + sorted(RC.NO_ARTIFACT_TREES):
             self.assertIn(f"`{name}`", agents)
+        for tree in RC.GO_SOURCE_TREES:
+            self.assertIn(f"`{tree}`", agents)
+        self.assertIn("Go `_test.go` files", agents)
         self.assertIn("Markdown files under `docs/`", agents)
         self.assertIn("no-artifact", agents)
         self.assertIn("nothing to version, sign, scan", agents)

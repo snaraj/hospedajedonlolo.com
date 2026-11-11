@@ -115,7 +115,11 @@ GitHub documents that `GITHUB_TOKEN`-created refs suppress recursive workflow
 events except explicit dispatch, that `workflow_run` fires regardless of
 conclusion and uses default-branch context, and that concurrency ordering is
 not a release ledger. Therefore the success check, payload `head_sha`, tag-ref
-dispatch, and independent per-SHA paths are load-bearing.
+dispatch, and independent per-SHA paths are load-bearing. The orchestrator's
+`branches: [main]` filter only spares the empty runs a pull request's gate
+used to start: it matches the triggering run's head branch by name, which a
+fork's branch can also carry, so the job's own conditions (success, push
+event, branch `main`) remain the guard.
 
 - <https://docs.github.com/en/actions/concepts/security/github_token>
 - <https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run>
