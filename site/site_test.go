@@ -39,6 +39,21 @@ var scriptEdits = []struct{ delivered, shipped string }{
 	// content-addressed URL, which its button carries in data-photo, instead
 	// of building an unversioned one from a key.
 	{"dialog.querySelector('img').src='assets/'+button.dataset.photo+'.webp';", "dialog.querySelector('img').src=button.dataset.photo;"},
+	// Release 0.1.7: the page stops scrolling behind the open lightbox in
+	// engines without :has() (Firefox before 121) too. style.css locks
+	// body.lightbox-open as well as body:has(dialog[open]); the class goes on
+	// only after showModal() succeeds, so an engine without <dialog> is never
+	// left locked, and comes off on the dialog's close event, which the close
+	// button, a backdrop click and Escape all end in.
+	{"dialog.showModal();}", "dialog.showModal();document.body.classList.add('lightbox-open');}"},
+	{"if(event.target===dialog)dialog.close();});", "if(event.target===dialog)dialog.close();});dialog.addEventListener('close',()=>document.body.classList.remove('lightbox-open'));"},
+	// Release 0.1.7: where SubmitEvent.submitter does not exist (Safari
+	// before 15.4) the form reads the submit button the visitor last
+	// clicked, so an email inquiry no longer goes to WhatsApp. Implicit
+	// submission clicks the form's first submit button (WhatsApp), so the
+	// Enter key still sends there; where submitter exists, it decides.
+	{"departure=form.elements.departure;", "departure=form.elements.departure;let clicked;form.querySelectorAll('[type=submit]').forEach(button=>button.addEventListener('click',()=>clicked=button));"},
+	{"event.submitter?.value==='email'", "(event.submitter||clicked)?.value==='email'"},
 }
 
 // TestScriptKeepsTheDeliveredLines proves the only changes to the delivered
@@ -271,11 +286,14 @@ func TestNothingOnThePageWeakensItsReferrerPolicy(t *testing.T) {
 //     images below the fold decode asynchronously; every image but the
 //     lightbox's states its size, and the farm photograph's rule gains
 //     height:auto so its stated height cannot override its aspect ratio.
-//     TestImagesDeclareTheirSizes pins it.
+//     TestImagesDeclareTheirSizes pins it;
+//   - older engines: the lightbox's scroll lock gains a class the script
+//     sets (style.css, scriptEdits), and the booking form falls back to the
+//     submit button last clicked where SubmitEvent.submitter is missing.
 var exported = map[string]string{
-	"index.html":                    "d2b593dcb9a27fa8d8832630962e082cb0b58156debee6b4c152c0c953e511c0",
-	"style.css":                     "29202d36289976d214eb2b48930288ff63a8b2c3eaaa366d00f9defa7eaccbc3",
-	"app.js":                        "0ce5218a46024d67ee41872c9c817ffb2df5dcbf504409829890a79e57016216",
+	"index.html":                    "8f6ac07afdb15fb70ebcf87715804d2b23ec3e5f312474c057764f099cec4155",
+	"style.css":                     "5223dc42f87df1ae3a6e294246ef308df3fff408981da81eb56c1a52b29631b2",
+	"app.js":                        "7f6774ff4e6bf6a2036d5951794403f4f98375a48a3c4c73c9d4113613801e0b",
 	"assets/font-0.ttf":             "b0ae3e89a7d3ef2b1838bb4b1ceb0b17cc3435af061eee809d76aa623ff116e9",
 	"assets/font-1.ttf":             "376427b5322148d8de1e03f263bcca4935a2d60ba71d9f94f4947ab664c711ae",
 	"assets/font-2.ttf":             "b79a2ea7a38f33fd96a282fadb9ce97626bb0724a44d21075859f0e50239993a",
@@ -528,6 +546,25 @@ func TestMediaPinsAreWellFormed(t *testing.T) {
 	}
 	if !names["don-lolo.mp4"] {
 		t.Error("the delivered film is not a pinned media file")
+	}
+}
+
+// TestTheScrollLockHasAFallback pins the lightbox's two scroll locks as two
+// rules. Joined in one selector list, an engine that cannot parse :has()
+// (Firefox before 121) would drop the whole rule, the class with it.
+func TestTheScrollLockHasAFallback(t *testing.T) {
+	data, err := fs.ReadFile(Pages, "style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(data)
+	for _, rule := range []string{"}body:has(dialog[open]){overflow:hidden}", "}body.lightbox-open{overflow:hidden}"} {
+		if strings.Count(css, rule) != 1 {
+			t.Errorf("style.css does not carry %s once, as a rule of its own", rule[1:])
+		}
+	}
+	if regexp.MustCompile(`body\.lightbox-open\s*,|,\s*body\.lightbox-open`).MatchString(css) {
+		t.Error("the class lock shares a selector list")
 	}
 }
 
