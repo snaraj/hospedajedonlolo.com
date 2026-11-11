@@ -8674,9 +8674,6 @@ class WorkflowStructureTests(unittest.TestCase):
             "ref: main",
             "persist-credentials: false",
             "fetch-depth: 0",
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
-            "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1",
-            "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2",
             '"repos/${GITHUB_REPOSITORY}/releases/latest"',
             "manifest-record",
             "release-notes",
@@ -8715,6 +8712,26 @@ class WorkflowStructureTests(unittest.TestCase):
         for required in audit_requirements:
             if required not in audit:
                 raise ValueError(f"recurring alias audit lost exact binding: {required}")
+        # The audit's three actions are bound by behaviour, not inventory
+        # (issue #16): each is a full commit SHA with a version comment, and
+        # the very pin the publisher runs, so the audit re-verifies with the
+        # tooling that made the release and an actions bump moves both files
+        # instead of this test. It used to require three literal SHAs, which
+        # reddened every Dependabot bump of a shared action.
+        uses = re.compile(r"^\s*(?:-\s+)?uses:\s+([^@\s]+)@(\S*)(.*)$", re.MULTILINE)
+        for action in ("actions/checkout", "docker/setup-buildx-action", "sigstore/cosign-installer"):
+            audit_pins = {(ref, rest) for name, ref, rest in uses.findall(audit) if name == action}
+            publisher_pins = {(ref, rest) for name, ref, rest in uses.findall(publisher) if name == action}
+            if not audit_pins:
+                raise ValueError(f"recurring alias audit lost {action}")
+            for ref, rest in audit_pins | publisher_pins:
+                if not re.fullmatch(r"[0-9a-f]{40}", ref) or not re.fullmatch(r" # v[0-9]+(\.[0-9]+)*", rest):
+                    raise ValueError(f"{action}@{ref}{rest} is not a full commit SHA with a version comment")
+            if audit_pins != publisher_pins:
+                raise ValueError(
+                    f"recurring alias audit pins {action} unlike the publisher: "
+                    f"{sorted(audit_pins)} vs {sorted(publisher_pins)}"
+                )
         for forbidden in (
             "contents: write",
             "packages: write",
@@ -9955,10 +9972,39 @@ class WorkflowStructureTests(unittest.TestCase):
             (gate, publisher, audit + "\n      gh api --method POST foreign\n", installer),
             (gate, publisher, audit, installer.replace("TRIVY_SHA256=", "TRIVY_SHA256_MUTATED=", 1)),
             (gate, publisher, audit, installer + "\n# aquasecurity/trivy-action@v0.36.0\n"),
+            # The audit's action pins (issue #16): a tag instead of a SHA, a
+            # SHA without its version comment, a short SHA, and a pin the
+            # publisher does not run, on either side or in the comment alone.
+            (gate, publisher, re.sub(r"sigstore/cosign-installer@\S+ # ", "sigstore/cosign-installer@v4 # ", audit), installer),
+            (gate, publisher, re.sub(r"(docker/setup-buildx-action@[0-9a-f]{40}) # \S+", r"\1", audit), installer),
+            (gate, publisher, re.sub(r"actions/checkout@([0-9a-f]{12})[0-9a-f]{28}", r"actions/checkout@\1", audit), installer),
+            (gate, publisher, re.sub(r"sigstore/cosign-installer@[0-9a-f]{40}", "sigstore/cosign-installer@" + "0" * 40, audit), installer),
+            (gate, re.sub(r"docker/setup-buildx-action@[0-9a-f]{40}", "docker/setup-buildx-action@" + "1" * 40, publisher), audit, installer),
+            (gate, publisher, re.sub(r"(actions/checkout@[0-9a-f]{40}) # v[0-9.]+", r"\1 # v0.0.0", audit), installer),
+            (gate, re.sub(r"sigstore/cosign-installer@\S+ # ", "sigstore/cosign-installer@v4 # ", publisher), re.sub(r"sigstore/cosign-installer@\S+ # ", "sigstore/cosign-installer@v4 # ", audit), installer),
+            (gate, publisher, re.sub(r"\n\s*(?:-\s+)?uses: sigstore/cosign-installer@[^\n]*", "", audit), installer),
+            # Made on both sides, a tag or a missing version comment passes
+            # the equality above, so only the shape rule can refuse it.
+            (gate, re.sub(r"(docker/setup-buildx-action@[0-9a-f]{40}) # \S+", r"\1", publisher), re.sub(r"(docker/setup-buildx-action@[0-9a-f]{40}) # \S+", r"\1", audit), installer),
+            # And the action gone from both: equal, but the audit lost it.
+            (gate, re.sub(r"\n\s*(?:-\s+)?uses: sigstore/cosign-installer@[^\n]*", "", publisher), re.sub(r"\n\s*(?:-\s+)?uses: sigstore/cosign-installer@[^\n]*", "", audit), installer),
         )
         for index, mutant in enumerate(mutants):
+            self.assertNotEqual(mutant, (gate, publisher, audit, installer), f"hostile mutant {index} changed nothing")
             with self.subTest(hostile_mutant=index), self.assertRaises(ValueError):
                 self.require_vulnerability_and_alias_audit(*mutant)
+        # The same bump made on both sides passes: the binding is equality,
+        # not a remembered SHA.
+        moved = {
+            side: re.sub(
+                r"sigstore/cosign-installer@[0-9a-f]{40} # \S+",
+                "sigstore/cosign-installer@" + "a" * 40 + " # v9.9.9",
+                text,
+            )
+            for side, text in (("publisher", publisher), ("audit", audit))
+        }
+        self.assertNotEqual(moved["audit"], audit)
+        self.require_vulnerability_and_alias_audit(gate, moved["publisher"], moved["audit"], installer)
 
 
 if __name__ == "__main__":

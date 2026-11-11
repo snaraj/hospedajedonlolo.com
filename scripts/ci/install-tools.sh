@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Install the exact pinned CI tools with SHA-256-verified downloads, outside
 # the checkout so tree scanners never scan the scanners. Mirrors the pattern
-# proven in snaraj/website-infrastructure.
+# proven in snaraj/website-infrastructure. Each download retries transient
+# failures (a release CDN answering 5xx or a dropped connection would
+# otherwise redden the gate) and is then verified against its pinned digest
+# exactly as before: a retry can only fetch the same bytes again.
 set -euo pipefail
 
 GITLEAKS_VERSION=v8.30.1
@@ -18,7 +21,9 @@ trap 'rm -rf -- "${download_root}"' EXIT
 
 fetch_verify() {
   local url="$1" sha="$2" out="$3"
-  curl --proto '=https' --tlsv1.2 -sSfL "${url}" -o "${out}"
+  curl --proto '=https' --tlsv1.2 -sSfL \
+    --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 \
+    "${url}" -o "${out}"
   printf '%s  %s\n' "${sha}" "${out}" | sha256sum -c - >/dev/null
 }
 

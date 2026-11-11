@@ -14,6 +14,11 @@ on:
   workflow_run:
     workflows: [PR gate]
     types: [completed]
+    # Only a completed run on main can release, so only one starts this
+    # workflow: without the filter every pull request's gate run started a
+    # run here that its first job then skipped. The job's own conditions
+    # below stay the guard; the filter only stops the empty runs.
+    branches: [main]
 
 permissions: {}
 
